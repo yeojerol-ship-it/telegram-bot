@@ -253,73 +253,18 @@ const CATEGORY_LABEL: Record<string, string> = {
 
 const categoryMap: Record<string, string> = {
   hotels: 'hotel',
+  hotel: 'hotel',
   flights: 'flight',
+  flight: 'flight',
   activities: 'activity',
+  activity: 'activity',
+  attraction: 'activity',
+  attractions: 'activity',
 };
 
-bot.command('remove', async (ctx) => {
-  const parts = ctx.message.text.split(' ');
-  const arg = parts[1]?.toLowerCase();
-  const num = parseInt(parts[2]);
+// ── Shared list logic ────────────────────────────────────────────────────────
 
-  const category = categoryMap[arg];
-  if (!category || isNaN(num) || num < 1) {
-    ctx.reply('Usage: /remove hotels 2 — removes item #2 from the list');
-    return;
-  }
-
-  const chatId = ctx.chat.id.toString();
-  const { data, error } = await supabase
-    .from('trip_links')
-    .select('id, url')
-    .eq('chat_id', chatId)
-    .eq('category', category)
-    .order('created_at', { ascending: true });
-
-  if (error || !data) {
-    ctx.reply('Failed to fetch links');
-    return;
-  }
-
-  // Deduplicate to match what /list shows
-  const seen = new Set<string>();
-  const unique = data.filter((row) => {
-    if (seen.has(row.url)) return false;
-    seen.add(row.url);
-    return true;
-  });
-
-  const target = unique[num - 1];
-  if (!target) {
-    ctx.reply(`Hmm, there's no item #${num} in the ${arg} list. Try /list ${arg} to see what's there.`);
-    return;
-  }
-
-  // Delete all rows with this URL in this chat
-  const { error: deleteError } = await supabase
-    .from('trip_links')
-    .delete()
-    .eq('chat_id', chatId)
-    .eq('url', target.url);
-
-  if (deleteError) {
-    console.error('Delete error:', deleteError.message);
-    ctx.reply('Failed to remove link');
-  } else {
-    ctx.reply(`Gone! Removed #${num} from ${CATEGORY_LABEL[category]} 🗑️`);
-  }
-});
-
-bot.command('list', async (ctx) => {
-  const parts = ctx.message.text.split(' ');
-  const arg = parts[1]?.toLowerCase();
-
-  const category = categoryMap[arg];
-  if (!category) {
-    ctx.reply('Try /list hotels, /list flights, or /list activities');
-    return;
-  }
-
+async function listCategory(ctx: any, category: string) {
   const chatId = ctx.chat.id.toString();
   const { data, error } = await supabase
     .from('trip_links')
@@ -329,7 +274,6 @@ bot.command('list', async (ctx) => {
     .order('created_at', { ascending: true });
 
   if (error) {
-    console.error('Supabase fetch error:', error.message);
     ctx.reply('Failed to fetch links');
     return;
   }
@@ -339,7 +283,6 @@ bot.command('list', async (ctx) => {
     return;
   }
 
-  // Deduplicate by URL
   const seen = new Set<string>();
   const unique = data.filter((row) => {
     if (seen.has(row.url)) return false;
@@ -368,6 +311,110 @@ bot.command('list', async (ctx) => {
     parse_mode: 'HTML',
     link_preview_options: { is_disabled: true },
   });
+}
+
+// ── Shared remove logic ──────────────────────────────────────────────────────
+
+async function removeFromCategory(ctx: any, category: string, num: number) {
+  const chatId = ctx.chat.id.toString();
+  const { data, error } = await supabase
+    .from('trip_links')
+    .select('id, url')
+    .eq('chat_id', chatId)
+    .eq('category', category)
+    .order('created_at', { ascending: true });
+
+  if (error || !data) {
+    ctx.reply('Failed to fetch links');
+    return;
+  }
+
+  const seen = new Set<string>();
+  const unique = data.filter((row) => {
+    if (seen.has(row.url)) return false;
+    seen.add(row.url);
+    return true;
+  });
+
+  const target = unique[num - 1];
+  if (!target) {
+    ctx.reply(`Hmm, there's no item #${num} in that list.`);
+    return;
+  }
+
+  const { error: deleteError } = await supabase
+    .from('trip_links')
+    .delete()
+    .eq('chat_id', chatId)
+    .eq('url', target.url);
+
+  if (deleteError) {
+    ctx.reply('Failed to remove link');
+  } else {
+    ctx.reply(`Gone! Removed #${num} from ${CATEGORY_LABEL[category]} 🗑️`);
+  }
+}
+
+// ── Claude intent parsing ────────────────────────────────────────────────────
+
+type Intent =
+  | { action: 'list'; category: string }
+  | { action: 'remove'; category: string; number: number }
+  | { action: 'help' }
+  | { action: 'unknown' };
+
+async function parseIntent(text: string): Promise<Intent> {
+  try {
+    const response = await anthropic.messages.create({
+      model: 'claude-opus-4-6',
+      max_tokens: 80,
+      messages: [{
+        role: 'user',
+        content: `You are a trip planning bot assistant. Classify this message intent and reply with JSON only — no explanation.
+
+Message: "${text}"
+
+Possible intents:
+- List saved links: {"action":"list","category":"hotel"|"flight"|"activity"}
+- Remove an item: {"action":"remove","category":"hotel"|"flight"|"activity","number":<integer>}
+- Help request: {"action":"help"}
+- Anything else: {"action":"unknown"}
+
+Reply with only the JSON object.`,
+      }],
+    });
+    const block = response.content[0];
+    if (block.type !== 'text') return { action: 'unknown' };
+    const json = JSON.parse(block.text.trim().replace(/^```json|```$/g, '').trim());
+    return json as Intent;
+  } catch {
+    return { action: 'unknown' };
+  }
+}
+
+// ── Commands ─────────────────────────────────────────────────────────────────
+
+bot.command('remove', async (ctx) => {
+  const parts = ctx.message.text.split(' ');
+  const arg = parts[1]?.toLowerCase();
+  const num = parseInt(parts[2]);
+  const category = categoryMap[arg];
+  if (!category || isNaN(num) || num < 1) {
+    ctx.reply('Usage: /remove hotels 2 — removes item #2 from the list');
+    return;
+  }
+  await removeFromCategory(ctx, category, num);
+});
+
+bot.command('list', async (ctx) => {
+  const parts = ctx.message.text.split(' ');
+  const arg = parts[1]?.toLowerCase();
+  const category = categoryMap[arg];
+  if (!category) {
+    ctx.reply('Try /list hotels, /list flights, or /list activities');
+    return;
+  }
+  await listCategory(ctx, category);
 });
 
 const URL_REGEX = /https?:\/\/[^\s]+|www\.[^\s]+/i;
@@ -387,11 +434,45 @@ bot.on('message', async (ctx) => {
   if (!text) return;
 
   const chatId = ctx.chat.id.toString();
+  const userName = ctx.from?.username ?? ctx.from?.first_name ?? 'unknown';
 
+  // ── @ mention handler ──────────────────────────────────────────────────────
+  const botUsername = ctx.botInfo?.username;
+  const mentionPattern = botUsername ? new RegExp(`@${botUsername}`, 'i') : null;
+
+  if (mentionPattern && mentionPattern.test(text)) {
+    const query = text.replace(mentionPattern, '').trim();
+    if (!query) {
+      ctx.reply("Hey! 👋 Try asking me things like:\n• \"@bot show me the hotels\"\n• \"@bot what activities do we have?\"\n• \"@bot remove hotel 2\"");
+      return;
+    }
+
+    const intent = await parseIntent(query);
+
+    if (intent.action === 'list') {
+      await listCategory(ctx, intent.category);
+    } else if (intent.action === 'remove') {
+      await removeFromCategory(ctx, intent.category, intent.number);
+    } else if (intent.action === 'help') {
+      ctx.reply(
+        "Here's what I can do:\n\n" +
+        "📎 Drop any hotel, flight, or activity link — I'll save it automatically\n\n" +
+        "/list hotels — see all saved hotels\n" +
+        "/list flights — see all saved flights\n" +
+        "/list activities — see all saved activities\n" +
+        "/remove hotels 2 — remove item #2 from the hotels list\n\n" +
+        "Or just @ me in plain English!"
+      );
+    } else {
+      ctx.reply("Not sure what you mean 🤔 Try something like \"show me the hotels\" or \"remove activity 3\"");
+    }
+    return;
+  }
+
+  // ── URL save handler ───────────────────────────────────────────────────────
   if (!URL_REGEX.test(text)) return;
 
   const url = text.match(URL_REGEX)![0];
-  const userName = ctx.from?.username ?? ctx.from?.first_name ?? 'unknown';
   const category = categorize(url);
   const label = await fetchTitle(url);
 
