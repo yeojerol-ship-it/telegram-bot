@@ -586,9 +586,25 @@ function isTikTokUrl(url: string): boolean {
   }
 }
 
+/** Extract @username and video ID from a TikTok URL for use as search context */
+function parseTikTokUrl(url: string): { username: string | null; videoId: string | null } {
+  try {
+    const { pathname } = new URL(url.startsWith('http') ? url : 'https://' + url);
+    const userMatch = pathname.match(/@([^/]+)/);
+    const videoMatch = pathname.match(/\/video\/(\d+)/);
+    return {
+      username: userMatch?.[1] ?? null,
+      videoId: videoMatch?.[1] ?? null,
+    };
+  } catch {
+    return { username: null, videoId: null };
+  }
+}
+
 /**
- * Infers a title + subtitle for a TikTok link from the surrounding message text.
- * Designed to be swappable: replace the body with real scraping or video-AI later.
+ * Infers a title + subtitle for a TikTok link.
+ * Priority: caption text → web search (Claude) → URL username hint → fallback.
+ * Designed to be swappable: replace with real scraping or video-AI later.
  */
 async function summarizeTikTokContent(
   url: string,
@@ -596,35 +612,80 @@ async function summarizeTikTokContent(
 ): Promise<{ title: string; subtitle: string }> {
   const FALLBACK = { title: 'TikTok link', subtitle: 'Shared TikTok content' };
 
-  // Strip the URL itself from the message so we only use human context
+  // Strip the URL itself so we only keep human-written context
   const context = messageText.replace(/https?:\/\/\S+/g, '').trim();
-  if (!context) return FALLBACK;
 
-  try {
-    const response = await anthropic.messages.create({
-      model: 'claude-opus-4-6',
-      max_tokens: 80,
-      messages: [{
-        role: 'user',
-        content: `A TikTok video was shared with this caption or message: "${context}"
+  // Path A: caption/message text is available — ask Claude to summarise it
+  if (context) {
+    try {
+      const response = await anthropic.messages.create({
+        model: 'claude-opus-4-6',
+        max_tokens: 80,
+        messages: [{
+          role: 'user',
+          content: `A TikTok video was shared with this caption or message: "${context}"
 
 Generate:
 Line 1: A short title (3–6 words) describing what the TikTok is about
 Line 2: One punchy sentence with more detail
 
 Reply with only these 2 lines, no labels or numbering.`,
-      }],
-    });
-    const block = response.content[0];
-    if (block.type !== 'text') return FALLBACK;
-    const [titleLine, subtitleLine] = block.text.trim().split('\n').map(l => l.trim()).filter(Boolean);
-    return {
-      title: titleLine || FALLBACK.title,
-      subtitle: subtitleLine || FALLBACK.subtitle,
-    };
-  } catch {
-    return FALLBACK;
+        }],
+      });
+      const block = response.content[0];
+      if (block.type === 'text') {
+        const [titleLine, subtitleLine] = block.text.trim().split('\n').map(l => l.trim()).filter(Boolean);
+        if (titleLine) return { title: titleLine, subtitle: subtitleLine || FALLBACK.subtitle };
+      }
+    } catch {
+      // fall through to web search
+    }
   }
+
+  // Path B: no caption — search the web for the video using Claude web_search
+  const { username, videoId } = parseTikTokUrl(url);
+  const searchQuery = videoId
+    ? `TikTok video ${videoId}${username ? ` by @${username}` : ''}`
+    : username
+    ? `TikTok @${username} video site:tiktok.com`
+    : url;
+
+  try {
+    const messages: any[] = [{
+      role: 'user',
+      content: `Search for this TikTok video and tell me what it's about: ${searchQuery}\n\nReply with exactly 2 lines:\nLine 1: Short title (3–6 words)\nLine 2: One sentence description\n\nIf you cannot find it, reply:\nTikTok video\nShared TikTok content`,
+    }];
+
+    for (let i = 0; i < 5; i++) {
+      const response = await anthropic.messages.create({
+        model: 'claude-opus-4-6',
+        max_tokens: 100,
+        tools: [{ type: 'web_search_20260209', name: 'web_search' } as any],
+        messages,
+      });
+      messages.push({ role: 'assistant', content: response.content });
+
+      if (response.stop_reason === 'end_turn') {
+        const textBlock = response.content.find((b: any) => b.type === 'text');
+        if (textBlock && 'text' in textBlock) {
+          const [titleLine, subtitleLine] = (textBlock as any).text.trim().split('\n').map((l: string) => l.trim()).filter(Boolean);
+          if (titleLine && titleLine.toLowerCase() !== 'tiktok video') {
+            return { title: titleLine, subtitle: subtitleLine || FALLBACK.subtitle };
+          }
+        }
+        break;
+      }
+    }
+  } catch {
+    // fall through to username hint
+  }
+
+  // Path C: at least show the creator's username as a hint
+  if (username) {
+    return { title: `TikTok by @${username}`, subtitle: 'Shared TikTok video' };
+  }
+
+  return FALLBACK;
 }
 
 // ── Shared list logic ────────────────────────────────────────────────────────
