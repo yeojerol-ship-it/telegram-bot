@@ -188,44 +188,53 @@ ${context ? `Data:\n${context}` : ''}`,
   }
 }
 
+async function fetchTitleViaJina(url: string): Promise<string | null> {
+  try {
+    const fullUrl = url.startsWith('http') ? url : 'https://' + url;
+    const res = await fetch(`https://r.jina.ai/${fullUrl}`, {
+      headers: {
+        'Accept': 'text/markdown, text/plain',
+        'X-Return-Format': 'markdown',
+        'X-Timeout': '10',
+      },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return null;
+    const text = await res.text();
+    // Jina returns "Title: <title>" near the top
+    const titleMatch = text.match(/^Title:\s*(.+)$/m) ?? text.match(/^#\s+(.+)$/m);
+    const title = titleMatch?.[1]?.trim();
+    console.log('jina title:', title);
+    if (!title || title.length < 3) return null;
+    return title;
+  } catch (e) {
+    console.log('jina error:', e);
+    return null;
+  }
+}
+
 async function fetchTitle(url: string): Promise<string> {
-  // 1. Try slug extraction from URL path (fast, no network)
+  // 1. Slug from URL path — instant, no network
   const slugName = extractNameFromUrl(url);
   if (slugName) return slugName;
 
-  // 2. For JS-heavy sites (KKday, Klook): fetch HTML and send to Claude directly
-  //    These sites use client-side rendering — og:title just returns the site name
-  if (url.includes('kkday') || url.includes('klook')) {
-    try {
-      let targetUrl = url;
-      // Resolve short/redirect URLs first
-      try {
-        const res = await fetch(url.startsWith('http') ? url : 'https://' + url, {
-          method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(6000),
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-        });
-        targetUrl = res.url || url;
-      } catch {}
-      const html = await fetchPageHtml(targetUrl);
-      return await fetchTitleViaClaude(targetUrl, html);
-    } catch (e) {
-      console.log('kkday/klook claude fetch error:', e);
-    }
-  }
+  // 2. Jina AI Reader — renders JS, returns clean markdown with real title
+  const jinaName = await fetchTitleViaJina(url);
+  if (jinaName) return jinaName;
 
-  // 3. For other sites: try og:title first (fast)
+  // 3. og:title via plain fetch (fast for SSR sites like Booking/Agoda)
   const ogName = await fetchOgTitle(url);
   if (ogName) return ogName;
 
-  // 4. Try jsonlink as a secondary option
+  // 4. jsonlink
   const jsonlinkName = await fetchTitleViaJsonLink(url);
   if (jsonlinkName) return jsonlinkName;
 
-  // 5. Bing search fallback (if key set)
+  // 5. Bing (if key set)
   const bingName = await fetchTitleViaBing(url);
   if (bingName) return bingName;
 
-  // 6. Final fallback: Claude reads whatever HTML the page serves
+  // 6. Claude reads __NEXT_DATA__ / raw HTML as last resort
   return await fetchTitleViaClaude(url);
 }
 
