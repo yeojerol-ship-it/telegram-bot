@@ -308,11 +308,20 @@ function urlFallbackTitle(url: string): string {
   }
 }
 
-const GENERIC_TITLES = ['kkday', 'klook', 'agoda', 'booking', 'book tours', 'book online', 'home page', 'homepage'];
+const GENERIC_BRANDS = ['kkday', 'klook', 'agoda', 'booking', 'expedia', 'airbnb', 'tripadvisor'];
+const GENERIC_PHRASES = ['book tours', 'book online', 'book activities', 'home page', 'explore. dream', 'things to do', 'best price'];
 
 function isGenericTitle(title: string): boolean {
   const lower = title.toLowerCase().trim();
-  return GENERIC_TITLES.some(t => lower === t || lower.startsWith(t + ' -') || lower.startsWith(t + '.'));
+  // Brand name alone or with short suffix
+  if (GENERIC_BRANDS.some(b => lower === b || lower === b + '.com')) return true;
+  // Title starts with brand: "KKday - ..." or "Klook | ..."
+  if (GENERIC_BRANDS.some(b => lower.startsWith(b + ' ') || lower.startsWith(b + '-') || lower.startsWith(b + '|'))) return true;
+  // Title ends with brand: "Some tagline - KKday" or "Some tagline | Klook"
+  if (GENERIC_BRANDS.some(b => lower.endsWith('- ' + b) || lower.endsWith('| ' + b) || lower.endsWith(' ' + b))) return true;
+  // Generic marketing phrases
+  if (GENERIC_PHRASES.some(p => lower.includes(p))) return true;
+  return false;
 }
 
 async function fetchTitleViaSocialCrawler(url: string): Promise<string | null> {
