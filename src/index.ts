@@ -625,11 +625,11 @@ async function listCategory(ctx: any, category: string) {
 
 // ── Shared remove logic ──────────────────────────────────────────────────────
 
-async function removeFromCategory(ctx: any, category: string, num: number) {
+async function removeFromCategory(ctx: any, category: string, nums: number[]) {
   const chatId = ctx.chat.id.toString();
   const { data, error } = await supabase
     .from('trip_links')
-    .select('id, url')
+    .select('id, url, label')
     .eq('chat_id', chatId)
     .eq('category', category)
     .order('created_at', { ascending: true });
@@ -646,22 +646,24 @@ async function removeFromCategory(ctx: any, category: string, num: number) {
     return true;
   });
 
-  const target = unique[num - 1];
-  if (!target) {
-    ctx.reply(`Hmm, there's no item #${num} in that list.`);
+  const targets = nums.map(n => unique[n - 1]).filter(Boolean);
+  if (targets.length === 0) {
+    ctx.reply(`Hmm, none of those numbers exist in the list.`);
     return;
   }
 
+  const urls = targets.map(t => t.url);
   const { error: deleteError } = await supabase
     .from('trip_links')
     .delete()
     .eq('chat_id', chatId)
-    .eq('url', target.url);
+    .in('url', urls);
 
   if (deleteError) {
-    ctx.reply('Failed to remove link');
+    ctx.reply('Failed to remove links');
   } else {
-    ctx.reply(`Gone! Removed #${num} from ${CATEGORY_LABEL[category]} 🗑️`);
+    const names = targets.map((t, i) => `#${nums[i]} ${t.label || 'Unnamed'}`).join(', ');
+    ctx.reply(`Gone! Removed ${names} from ${CATEGORY_LABEL[category]} 🗑️`);
   }
 }
 
@@ -669,9 +671,9 @@ async function removeFromCategory(ctx: any, category: string, num: number) {
 
 type Intent =
   | { action: 'list'; category: string }
-  | { action: 'remove'; category: string; number: number }
+  | { action: 'remove'; category: string; numbers: number[] }
   | { action: 'recommend'; query: string }
-  | { action: 'save_rec'; index?: number; name?: string }
+  | { action: 'save_rec'; indices?: number[]; names?: string[] }
   | { action: 'help' }
   | { action: 'unknown' };
 
@@ -679,7 +681,7 @@ async function parseIntent(text: string): Promise<Intent> {
   try {
     const response = await anthropic.messages.create({
       model: 'claude-opus-4-6',
-      max_tokens: 120,
+      max_tokens: 150,
       messages: [{
         role: 'user',
         content: `You are a trip planning bot. Classify this message intent and reply with JSON only.
@@ -688,9 +690,9 @@ Message: "${text}"
 
 Intents:
 - List saved links: {"action":"list","category":"hotel"|"flight"|"activity"|"food"}
-- Remove an item: {"action":"remove","category":"hotel"|"flight"|"activity"|"food","number":<integer>}
-- Ask for recommendations (places, food, activities, things to do): {"action":"recommend","query":"<full query>"}
-- Save a recommendation by number or name: {"action":"save_rec","index":<number or null>,"name":"<name or null>"}
+- Remove one or more items (support "2 and 3", "2, 3", "2 3"): {"action":"remove","category":"hotel"|"flight"|"activity"|"food","numbers":[<integers>]}
+- Ask for recommendations: {"action":"recommend","query":"<full query>"}
+- Save one or more recommendations by number or name: {"action":"save_rec","indices":[<numbers>],"names":[<names or empty>]}
 - Help: {"action":"help"}
 - Other: {"action":"unknown"}
 
@@ -709,15 +711,15 @@ Reply with only the JSON object.`,
 // ── Commands ─────────────────────────────────────────────────────────────────
 
 bot.command('remove', async (ctx) => {
-  const parts = ctx.message.text.split(' ');
+  const parts = ctx.message.text.split(/[\s,]+/);
   const arg = parts[1]?.toLowerCase();
-  const num = parseInt(parts[2]);
   const category = categoryMap[arg];
-  if (!category || isNaN(num) || num < 1) {
-    ctx.reply('Usage: /remove hotels 2 — removes item #2 from the list');
+  const nums = parts.slice(2).map(Number).filter(n => !isNaN(n) && n > 0);
+  if (!category || nums.length === 0) {
+    ctx.reply('Usage: /remove hotels 2 — or /remove hotels 2 3 to remove multiple');
     return;
   }
-  await removeFromCategory(ctx, category, num);
+  await removeFromCategory(ctx, category, nums);
 });
 
 bot.command('list', async (ctx) => {
@@ -793,7 +795,7 @@ bot.on('message', async (ctx) => {
     if (intent.action === 'list') {
       await listCategory(ctx, intent.category);
     } else if (intent.action === 'remove') {
-      await removeFromCategory(ctx, intent.category, intent.number);
+      await removeFromCategory(ctx, intent.category, intent.numbers ?? []);
     } else if (intent.action === 'recommend') {
       const msg = await generateRecommendations(intent.query, chatId);
       ctx.reply(msg, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
@@ -803,28 +805,35 @@ bot.on('message', async (ctx) => {
         ctx.reply('No recent recommendations to save — ask me for some first! e.g. "@bot recommend street food in Bangkok"');
         return;
       }
-      let rec = null;
-      if (intent.index && intent.index >= 1 && intent.index <= recs.length) {
-        rec = recs[intent.index - 1];
-      } else if (intent.name) {
-        rec = recs.find(r => r.name.toLowerCase().includes((intent.name as string).toLowerCase())) ?? null;
+
+      // Resolve which recs to save (by index or name)
+      const toSave: typeof recs = [];
+      for (const idx of (intent.indices ?? [])) {
+        if (idx >= 1 && idx <= recs.length) toSave.push(recs[idx - 1]);
       }
-      if (!rec) {
-        ctx.reply(`Couldn't find that one. Try "@bot save 1", "@bot save 2" etc.`);
+      for (const name of (intent.names ?? [])) {
+        const found = recs.find(r => r.name.toLowerCase().includes(name.toLowerCase()));
+        if (found && !toSave.includes(found)) toSave.push(found);
+      }
+      if (toSave.length === 0) {
+        ctx.reply(`Couldn't find those. Try "@bot save 1 2" or "@bot save 1, 3"`);
         return;
       }
-      const { error } = await supabase
-        .from('trip_links')
-        .insert({ chat_id: chatId, user_name: userName, message_text: rec.name, url: rec.mapsUrl, category: rec.category, label: rec.name });
-      if (error) {
-        ctx.reply('Failed to save — try again!');
-        return;
-      }
-      const safeName = rec.name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      ctx.reply(
-        `${CATEGORY_EMOJI[rec.category] || '📍'} Saved <b>${safeName}</b>!\n<a href="${rec.mapsUrl}">📍 Open in Maps</a>`,
-        { parse_mode: 'HTML', link_preview_options: { is_disabled: true } }
-      );
+
+      await Promise.all(toSave.map(rec =>
+        supabase.from('trip_links').insert({
+          chat_id: chatId, user_name: userName, message_text: rec.name,
+          url: rec.mapsUrl, category: rec.category, label: rec.name,
+        })
+      ));
+
+      const savedLines = toSave.map(rec => {
+        const safeName = rec.name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return `${CATEGORY_EMOJI[rec.category] || '📍'} <b>${safeName}</b> — <a href="${rec.mapsUrl}">📍 Maps</a>`;
+      }).join('\n');
+      ctx.reply(`Saved ${toSave.length} place${toSave.length > 1 ? 's' : ''}!\n\n${savedLines}`, {
+        parse_mode: 'HTML', link_preview_options: { is_disabled: true },
+      });
     } else if (intent.action === 'help') {
       ctx.reply(
         "Here's what I can do:\n\n" +
