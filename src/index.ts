@@ -523,7 +523,7 @@ function mapsUrl(name: string, location: string): string {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${name} ${location}`)}`;
 }
 
-async function generateRecommendations(query: string, chatId: string): Promise<{ text: string; keyboard: any[][] }> {
+async function generateRecommendations(query: string, chatId: string): Promise<string> {
   const response = await anthropic.messages.create({
     model: 'claude-opus-4-6',
     max_tokens: 1200,
@@ -544,10 +544,10 @@ Suggest 5 specific, real places. Reply with a JSON array only — no explanation
   });
 
   const block = response.content[0];
-  if (block.type !== 'text') return { text: 'Could not generate recommendations, try again!', keyboard: [] };
+  if (block.type !== 'text') return 'Could not generate recommendations, try again!';
 
   const jsonMatch = block.text.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) return { text: 'Could not generate recommendations, try again!', keyboard: [] };
+  if (!jsonMatch) return 'Could not generate recommendations, try again!';
 
   const recs = JSON.parse(jsonMatch[0]) as Array<{ name: string; description: string; location: string; category: string }>;
 
@@ -564,20 +564,10 @@ Suggest 5 specific, real places. Reply with a JSON array only — no explanation
   const lines = stored.map((r, i) => {
     const safeName = r.name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const safeDesc = r.description.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    return `${CATEGORY_EMOJI[r.category] || '📍'} <b>${i + 1}. ${safeName}</b>\n${safeDesc}\n<a href="${r.mapsUrl}">📍 Maps</a>`;
+    return `${CATEGORY_EMOJI[r.category] || '📍'} <b>${i + 1}. ${safeName}</b>\n${safeDesc}\n<a href="${r.mapsUrl}">📍 Open in Maps</a>`;
   });
 
-  // Save buttons: up to 3 per row
-  const saveButtons = stored.map((r, i) => ({
-    text: `💾 Save #${i + 1}`,
-    callback_data: `save_rec_btn:${i}:${chatId}`,
-  }));
-  const keyboard: any[][] = [];
-  for (let i = 0; i < saveButtons.length; i += 3) {
-    keyboard.push(saveButtons.slice(i, i + 3));
-  }
-
-  return { text: lines.join('\n\n'), keyboard };
+  return lines.join('\n\n') + '\n\n<i>To save any of these, say "@bot save 1" (or the number)</i>';
 }
 
 // ── Shared list logic ────────────────────────────────────────────────────────
@@ -810,8 +800,6 @@ bot.action(/^add_confirm:(.+)$/, async (ctx) => {
         [
           { text: '⛺️ Hotel', callback_data: `add_cat:hotel:${chatId}` },
           { text: '🍽️ Food & Drinks', callback_data: `add_cat:food:${chatId}` },
-        ],
-        [
           { text: '🦀 Activity', callback_data: `add_cat:activity:${chatId}` },
         ],
       ] },
@@ -851,43 +839,6 @@ bot.action(/^add_cat:(\w+):(.+)$/, async (ctx) => {
   await ctx.answerCbQuery('Saved! ✅');
 });
 
-// Save a single recommendation directly from its inline button
-bot.action(/^save_rec_btn:(\d+):(.+)$/, async (ctx) => {
-  const idx = parseInt(ctx.match[1], 10);
-  const chatId = ctx.match[2];
-  const userName = ctx.from?.username ?? ctx.from?.first_name ?? 'unknown';
-  const recs = pendingRecommendations.get(chatId);
-  if (!recs || idx >= recs.length) { await ctx.answerCbQuery('Recommendation expired — ask again!'); return; }
-
-  const rec = recs[idx];
-  const { error } = await supabase.from('trip_links').insert({
-    chat_id: chatId, user_name: userName, message_text: rec.name,
-    url: rec.mapsUrl, category: rec.category, label: rec.name,
-  });
-
-  if (error) {
-    await ctx.answerCbQuery('Failed to save, try again');
-    return;
-  }
-
-  // Update the button to show it's been saved
-  const safeName = rec.name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  await ctx.answerCbQuery(`✅ Saved ${rec.name}!`);
-
-  // Replace that button with a ✅ tick
-  const cbq = ctx.callbackQuery as any;
-  const currentMarkup = cbq.message?.reply_markup?.inline_keyboard as any[][] | undefined;
-  if (currentMarkup) {
-    const updated = currentMarkup.map((row: any[]) =>
-      row.map((btn: any) => btn.callback_data === cbq.data
-        ? { text: `✅ #${idx + 1} Saved`, callback_data: `noop` }
-        : btn)
-    );
-    await ctx.editMessageReplyMarkup({ inline_keyboard: updated } as any).catch(() => {});
-  }
-});
-
-bot.action('noop', async (ctx) => { await ctx.answerCbQuery(); });
 
 const URL_REGEX = /https?:\/\/[^\s]+|www\.[^\s]+/i;
 
@@ -949,12 +900,8 @@ bot.on('message', async (ctx) => {
     } else if (intent.action === 'remove') {
       await removeFromCategory(ctx, intent.category, intent.numbers ?? []);
     } else if (intent.action === 'recommend') {
-      const { text, keyboard } = await generateRecommendations(intent.query, chatId);
-      ctx.reply(text, {
-        parse_mode: 'HTML',
-        link_preview_options: { is_disabled: true },
-        ...(keyboard.length > 0 ? { reply_markup: { inline_keyboard: keyboard } } : {}),
-      } as any);
+      const msg = await generateRecommendations(intent.query, chatId);
+      ctx.reply(msg, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
     } else if (intent.action === 'save_rec') {
       const recs = pendingRecommendations.get(chatId);
       if (!recs || recs.length === 0) {
@@ -1004,8 +951,8 @@ bot.on('message', async (ctx) => {
           parse_mode: 'HTML',
           link_preview_options: { is_disabled: true },
           reply_markup: { inline_keyboard: [[
-            { text: '✅ That\'s it!', callback_data: `add_confirm:${chatId}` },
-            { text: '❌ Not this one', callback_data: `add_cancel:${chatId}` },
+            { text: '👍 Yes, that\'s it!', callback_data: `add_confirm:${chatId}` },
+            { text: '👎 Not this one', callback_data: `add_cancel:${chatId}` },
           ]] },
         } as any
       );
