@@ -185,21 +185,52 @@ async function fetchTitle(url: string): Promise<string> {
   const ogName = await fetchOgTitle(url);
   if (ogName) return ogName;
 
-  // Generate a meaningful fallback from the URL
-  try {
-    const { hostname, pathname } = new URL(url.startsWith('http') ? url : 'https://' + url);
-    const domain = hostname.replace('www.', '').split('.')[0];
-    const segments = pathname.split('/').filter(Boolean);
-    const lastSegment = segments[segments.length - 1];
-    if (lastSegment && lastSegment.length > 3 && !/^\d+$/.test(lastSegment)) {
-      const readable = decodeURIComponent(lastSegment).replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-      return `${readable} (${domain})`;
-    }
-    const domainName = domain.charAt(0).toUpperCase() + domain.slice(1);
-    return `${domainName} Link`;
-  } catch {}
+  // Last resort: send URL + raw page HTML to Claude for title extraction
+  return await fetchTitleViaClaude(url);
+}
 
-  return 'Unnamed';
+async function fetchTitleViaClaude(url: string): Promise<string> {
+  try {
+    const fullUrl = url.startsWith('http') ? url : 'https://' + url;
+
+    // Fetch raw HTML — even a JS shell has some metadata Claude can use
+    let htmlSnippet = '';
+    try {
+      const res = await fetch(fullUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+          'Accept': 'text/html,application/xhtml+xml',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        signal: AbortSignal.timeout(10000),
+        redirect: 'follow',
+      });
+      const html = await res.text();
+      // Pass only the first 4000 chars — head section has the useful metadata
+      htmlSnippet = html.slice(0, 4000);
+    } catch {}
+
+    const response = await anthropic.messages.create({
+      model: 'claude-opus-4-6',
+      max_tokens: 60,
+      messages: [{
+        role: 'user',
+        content: `Given this URL and page HTML snippet, return a short descriptive title (max 60 chars) for what this link is about. Reply with the title only — no explanation, no quotes.
+
+URL: ${fullUrl}
+${htmlSnippet ? `\nHTML snippet:\n${htmlSnippet}` : ''}`,
+      }],
+    });
+
+    const block = response.content[0];
+    if (block.type !== 'text') return 'Unnamed';
+    const title = block.text.trim();
+    console.log('claude title:', title, 'for', url);
+    return title || 'Unnamed';
+  } catch (e) {
+    console.log('fetchTitleViaClaude error:', e);
+    return 'Unnamed';
+  }
 }
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
