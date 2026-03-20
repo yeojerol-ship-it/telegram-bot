@@ -1,9 +1,6 @@
 import { Telegraf } from 'telegraf';
 import * as dotenv from 'dotenv';
 import { supabase } from './supabase';
-import puppeteer from 'puppeteer-extra';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-puppeteer.use(StealthPlugin());
 import Anthropic from '@anthropic-ai/sdk';
 
 dotenv.config();
@@ -154,37 +151,9 @@ async function fetchTitle(url: string): Promise<string> {
   const ogName = await fetchOgTitle(url);
   if (ogName) return ogName;
 
-  const fullUrl = url.startsWith('http') ? url : 'https://' + url;
-  const browser = await puppeteer.launch({ headless: true });
-  try {
-    const page = await browser.newPage();
-    await page.goto(fullUrl, { waitUntil: 'load', timeout: 20000 });
-    await page.waitForFunction(() => document.title.length > 0, { timeout: 10000 });
-    // Wait for page to render
-    await new Promise(r => setTimeout(r, 3000));
-    // Screenshot and send to Claude Vision to extract the name
-    const screenshot = await page.screenshot({ encoding: 'base64' }) as string;
-    const visionResponse = await anthropic.messages.create({
-      model: 'claude-opus-4-6',
-      max_tokens: 60,
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: screenshot } },
-          { type: 'text', text: 'What is the name of this activity/place shown on this page? Reply with only the name, nothing else.' },
-        ],
-      }],
-    });
-    const visionBlock = visionResponse.content[0];
-    const name = visionBlock.type === 'text' ? visionBlock.text.trim() : '';
-    console.log('claude vision name:', name);
-    return name || 'Unnamed';
-  } catch (e) {
-    console.log('fetchTitle error:', e);
-    return 'Unnamed';
-  } finally {
-    await browser.close();
-  }
+  // Last resort: plain fetch for og:title
+  const ogName = await fetchOgTitle(url);
+  return ogName || 'Unnamed';
 }
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
