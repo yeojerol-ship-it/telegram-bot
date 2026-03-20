@@ -132,6 +132,60 @@ async function fetchOgTitle(url: string): Promise<string | null> {
   }
 }
 
+// Search DuckDuckGo for the URL — it returns the indexed page title from its crawl cache
+async function fetchTitleViaDDG(url: string): Promise<string | null> {
+  try {
+    const { hostname, pathname } = new URL(url.startsWith('http') ? url : 'https://' + url);
+    const query = encodeURIComponent(`${hostname}${pathname}`);
+    const res = await fetch(`https://html.duckduckgo.com/html/?q=${query}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      signal: AbortSignal.timeout(12000),
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    const titleMatch = html.match(/class="result__a"[^>]*>([^<]+)<\/a>/);
+    const title = titleMatch?.[1]?.trim();
+    console.log('ddg title:', title);
+    if (title && !isGenericTitle(title)) return title;
+    return null;
+  } catch (e) {
+    console.log('ddg error:', e);
+    return null;
+  }
+}
+
+// Check Wayback Machine for a cached snapshot of the page
+async function fetchTitleViaWayback(url: string): Promise<string | null> {
+  try {
+    const check = await fetch(`https://archive.org/wayback/available?url=${encodeURIComponent(url)}`, {
+      signal: AbortSignal.timeout(8000),
+    });
+    const json = await check.json() as any;
+    const snapshotUrl = json?.archived_snapshots?.closest?.url;
+    if (!snapshotUrl) return null;
+
+    const res = await fetch(snapshotUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'text/html' },
+      signal: AbortSignal.timeout(12000),
+    });
+    const html = await res.text();
+    const ogTitle = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1]
+      ?? html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i)?.[1];
+    const pageTitle = html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1];
+    const name = ogTitle ?? pageTitle;
+    console.log('wayback title:', name);
+    if (name && !isGenericTitle(name)) return name.trim();
+    return null;
+  } catch (e) {
+    console.log('wayback error:', e);
+    return null;
+  }
+}
+
 async function fetchPageHtml(url: string): Promise<string> {
   const fullUrl = url.startsWith('http') ? url : 'https://' + url;
   const res = await fetch(fullUrl, {
@@ -281,32 +335,39 @@ async function fetchTitle(url: string): Promise<string> {
   const slugName = extractNameFromUrl(url);
   if (slugName) return slugName;
 
-  // 2. Social media crawler UAs (facebookexternalhit, Twitterbot, TelegramBot)
-  //    Sites like KKday/Klook serve proper og:title to these for link previews
+  // 2. DuckDuckGo search — uses DDG's crawl index which has the real page title
+  const ddgName = await fetchTitleViaDDG(url);
+  if (ddgName) return ddgName;
+
+  // 3. Wayback Machine — fetches a cached snapshot with full HTML
+  const waybackName = await fetchTitleViaWayback(url);
+  if (waybackName) return waybackName;
+
+  // 4. Social media crawler UAs — sites serve og:title to Facebook/Twitter/Telegram bots
   const socialName = await fetchTitleViaSocialCrawler(url);
   if (socialName) return socialName;
 
-  // 3. Jina AI Reader — renders JS pages, returns clean markdown with real title
+  // 5. Jina AI Reader — renders JS pages, returns clean markdown with real title
   const jinaName = await fetchTitleViaJina(url);
   if (jinaName && !isGenericTitle(jinaName)) return jinaName;
 
-  // 4. og:title via plain fetch (SSR sites like Booking/Agoda)
+  // 6. og:title via plain fetch (SSR sites like Booking/Agoda)
   const ogName = await fetchOgTitle(url);
   if (ogName && !isGenericTitle(ogName)) return ogName;
 
-  // 5. jsonlink
+  // 7. jsonlink
   const jsonlinkName = await fetchTitleViaJsonLink(url);
   if (jsonlinkName) return jsonlinkName;
 
-  // 6. Bing (if key set)
+  // 8. Bing API (if key set)
   const bingName = await fetchTitleViaBing(url);
   if (bingName) return bingName;
 
-  // 7. Claude reads __NEXT_DATA__ / raw HTML as last resort
+  // 9. Claude reads __NEXT_DATA__ / raw HTML
   const claudeName = await fetchTitleViaClaude(url);
   if (claudeName) return claudeName;
 
-  // 8. Meaningful fallback from URL structure (never show "Unnamed")
+  // 10. Meaningful fallback from URL structure
   return urlFallbackTitle(url);
 }
 
