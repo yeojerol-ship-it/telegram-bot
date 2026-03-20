@@ -186,6 +186,42 @@ async function fetchTitleViaWayback(url: string): Promise<string | null> {
   }
 }
 
+async function fetchTitleViaClaudeWebFetch(url: string): Promise<string | null> {
+  try {
+    const fullUrl = url.startsWith('http') ? url : 'https://' + url;
+    const messages: any[] = [{
+      role: 'user',
+      content: `Fetch this URL and return ONLY the main product or activity name in 3-5 words. No explanation, no punctuation.\n\nURL: ${fullUrl}`,
+    }];
+
+    for (let i = 0; i < 4; i++) {
+      const response = await anthropic.messages.create({
+        model: 'claude-opus-4-6',
+        max_tokens: 60,
+        tools: [{ type: 'web_fetch_20260209', name: 'web_fetch' } as any],
+        messages,
+      });
+
+      messages.push({ role: 'assistant', content: response.content });
+
+      if (response.stop_reason === 'end_turn') {
+        const textBlock = response.content.find((b: any) => b.type === 'text');
+        if (textBlock && 'text' in textBlock) {
+          const title = (textBlock as any).text.trim();
+          console.log('claude web_fetch title:', title);
+          if (title && title.length > 2 && title.length < 80) return title;
+        }
+        return null;
+      }
+      // pause_turn means server tool loop hit limit — re-send to continue
+    }
+    return null;
+  } catch (e) {
+    console.log('claude web_fetch error:', e);
+    return null;
+  }
+}
+
 async function fetchPageHtml(url: string): Promise<string> {
   const fullUrl = url.startsWith('http') ? url : 'https://' + url;
   const res = await fetch(fullUrl, {
@@ -335,7 +371,11 @@ async function fetchTitle(url: string): Promise<string> {
   const slugName = extractNameFromUrl(url);
   if (slugName) return slugName;
 
-  // 2. DuckDuckGo search — uses DDG's crawl index which has the real page title
+  // 2. Claude web_fetch — fetches from Anthropic's servers (different IP, bypasses CAPTCHA)
+  const claudeWebName = await fetchTitleViaClaudeWebFetch(url);
+  if (claudeWebName) return claudeWebName;
+
+  // 3. DuckDuckGo search — uses DDG's crawl index which has the real page title
   const ddgName = await fetchTitleViaDDG(url);
   if (ddgName) return ddgName;
 
