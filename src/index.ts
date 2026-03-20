@@ -586,25 +586,56 @@ function isTikTokUrl(url: string): boolean {
   }
 }
 
-/** Extract @username and video ID from a TikTok URL for use as search context */
+/** Follow redirects (e.g. vm.tiktok.com short links) to get the final URL */
+async function resolveTikTokUrl(url: string): Promise<string> {
+  try {
+    const res = await fetch(url.startsWith('http') ? url : 'https://' + url, {
+      method: 'HEAD',
+      redirect: 'follow',
+      signal: AbortSignal.timeout(8000),
+    });
+    return res.url || url;
+  } catch {
+    return url;
+  }
+}
+
+/** Extract @username and video ID from a full TikTok URL */
 function parseTikTokUrl(url: string): { username: string | null; videoId: string | null } {
   try {
     const { pathname } = new URL(url.startsWith('http') ? url : 'https://' + url);
     const userMatch = pathname.match(/@([^/]+)/);
     const videoMatch = pathname.match(/\/video\/(\d+)/);
-    return {
-      username: userMatch?.[1] ?? null,
-      videoId: videoMatch?.[1] ?? null,
-    };
+    return { username: userMatch?.[1] ?? null, videoId: videoMatch?.[1] ?? null };
   } catch {
     return { username: null, videoId: null };
   }
 }
 
+/** TikTok public oEmbed API — returns video title and author without auth */
+async function fetchTikTokOEmbed(url: string): Promise<{ title: string; author: string } | null> {
+  try {
+    const res = await fetch(
+      `https://www.tiktok.com/oembed?url=${encodeURIComponent(url)}`,
+      { signal: AbortSignal.timeout(8000) }
+    );
+    if (!res.ok) return null;
+    const json = await res.json() as any;
+    const title = json?.title?.trim();
+    const author = json?.author_name?.trim();
+    console.log('tiktok oembed title:', title, 'author:', author);
+    if (title && title.length > 1) return { title, author: author || '' };
+    return null;
+  } catch (e) {
+    console.log('tiktok oembed error:', e);
+    return null;
+  }
+}
+
 /**
  * Infers a title + subtitle for a TikTok link.
- * Priority: caption text → web search (Claude) → URL username hint → fallback.
- * Designed to be swappable: replace with real scraping or video-AI later.
+ * Priority: oEmbed API → caption text → username hint → fallback.
+ * Designed to be swappable: replace with richer scraping or video-AI later.
  */
 async function summarizeTikTokContent(
   url: string,
@@ -612,10 +643,39 @@ async function summarizeTikTokContent(
 ): Promise<{ title: string; subtitle: string }> {
   const FALLBACK = { title: 'TikTok link', subtitle: 'Shared TikTok content' };
 
-  // Strip the URL itself so we only keep human-written context
+  // Resolve short links (vm.tiktok.com) to full URL so oEmbed and parsing work
+  const fullUrl = await resolveTikTokUrl(url);
+  const { username } = parseTikTokUrl(fullUrl);
+
+  // Strip the URL from message to get human caption only
   const context = messageText.replace(/https?:\/\/\S+/g, '').trim();
 
-  // Path A: caption/message text is available — ask Claude to summarise it
+  // Path A: oEmbed — most reliable, returns actual video title
+  const oembed = await fetchTikTokOEmbed(fullUrl);
+  if (oembed) {
+    const title = oembed.title;
+    // If there's also a caption, ask Claude to write a richer subtitle
+    if (context) {
+      try {
+        const response = await anthropic.messages.create({
+          model: 'claude-opus-4-6',
+          max_tokens: 60,
+          messages: [{
+            role: 'user',
+            content: `TikTok video titled "${title}" was shared with this caption: "${context}"\n\nWrite one punchy sentence (max 15 words) describing what this video is about.\nReply with only that sentence.`,
+          }],
+        });
+        const block = response.content[0];
+        const subtitle = block.type === 'text' ? block.text.trim() : '';
+        return { title, subtitle: subtitle || `By @${oembed.author || username || 'unknown'}` };
+      } catch {
+        return { title, subtitle: `By @${oembed.author || username || 'unknown'}` };
+      }
+    }
+    return { title, subtitle: `By @${oembed.author || username || 'unknown'}` };
+  }
+
+  // Path B: caption only — summarise it with Claude
   if (context) {
     try {
       const response = await anthropic.messages.create({
@@ -623,13 +683,7 @@ async function summarizeTikTokContent(
         max_tokens: 80,
         messages: [{
           role: 'user',
-          content: `A TikTok video was shared with this caption or message: "${context}"
-
-Generate:
-Line 1: A short title (3–6 words) describing what the TikTok is about
-Line 2: One punchy sentence with more detail
-
-Reply with only these 2 lines, no labels or numbering.`,
+          content: `A TikTok was shared with this caption: "${context}"\n\nReply with exactly 2 lines:\nLine 1: Short title (3–6 words)\nLine 2: One punchy sentence with more detail`,
         }],
       });
       const block = response.content[0];
@@ -637,53 +691,11 @@ Reply with only these 2 lines, no labels or numbering.`,
         const [titleLine, subtitleLine] = block.text.trim().split('\n').map(l => l.trim()).filter(Boolean);
         if (titleLine) return { title: titleLine, subtitle: subtitleLine || FALLBACK.subtitle };
       }
-    } catch {
-      // fall through to web search
-    }
+    } catch {}
   }
 
-  // Path B: no caption — search the web for the video using Claude web_search
-  const { username, videoId } = parseTikTokUrl(url);
-  const searchQuery = videoId
-    ? `TikTok video ${videoId}${username ? ` by @${username}` : ''}`
-    : username
-    ? `TikTok @${username} video site:tiktok.com`
-    : url;
-
-  try {
-    const messages: any[] = [{
-      role: 'user',
-      content: `Search for this TikTok video and tell me what it's about: ${searchQuery}\n\nReply with exactly 2 lines:\nLine 1: Short title (3–6 words)\nLine 2: One sentence description\n\nIf you cannot find it, reply:\nTikTok video\nShared TikTok content`,
-    }];
-
-    for (let i = 0; i < 5; i++) {
-      const response = await anthropic.messages.create({
-        model: 'claude-opus-4-6',
-        max_tokens: 100,
-        tools: [{ type: 'web_search_20260209', name: 'web_search' } as any],
-        messages,
-      });
-      messages.push({ role: 'assistant', content: response.content });
-
-      if (response.stop_reason === 'end_turn') {
-        const textBlock = response.content.find((b: any) => b.type === 'text');
-        if (textBlock && 'text' in textBlock) {
-          const [titleLine, subtitleLine] = (textBlock as any).text.trim().split('\n').map((l: string) => l.trim()).filter(Boolean);
-          if (titleLine && titleLine.toLowerCase() !== 'tiktok video') {
-            return { title: titleLine, subtitle: subtitleLine || FALLBACK.subtitle };
-          }
-        }
-        break;
-      }
-    }
-  } catch {
-    // fall through to username hint
-  }
-
-  // Path C: at least show the creator's username as a hint
-  if (username) {
-    return { title: `TikTok by @${username}`, subtitle: 'Shared TikTok video' };
-  }
+  // Path C: show creator username as minimal hint
+  if (username) return { title: `TikTok by @${username}`, subtitle: 'Shared TikTok video' };
 
   return FALLBACK;
 }
