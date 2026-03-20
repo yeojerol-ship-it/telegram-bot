@@ -146,6 +146,27 @@ async function fetchTitle(url: string): Promise<string> {
   const bingName = await fetchTitleViaBing(url);
   if (bingName) return bingName;
 
+  // Try Googlebot fetch for KKday/Klook (sites serve SSR to crawlers)
+  if (url.includes('kkday') || url.includes('klook')) {
+    try {
+      const fullUrl = url.startsWith('http') ? url : 'https://' + url;
+      const res = await fetch(fullUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)' },
+        signal: AbortSignal.timeout(10000),
+        redirect: 'follow',
+      });
+      const html = await res.text();
+      const ogTitle = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1]
+        ?? html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i)?.[1];
+      const pageTitle = html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1];
+      const name = ogTitle ?? pageTitle;
+      console.log('googlebot fetch:', name);
+      if (name && !['kkday.com', 'klook.com'].includes(name.toLowerCase())) return name.trim();
+    } catch (e) {
+      console.log('googlebot fetch error:', e);
+    }
+  }
+
   // For Klook short URLs, resolve to get activity ID first
   let resolvedUrl = url;
   if (url.includes('klook')) {
