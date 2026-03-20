@@ -875,10 +875,11 @@ bot.action(/^save_rec_btn:(\d+):(.+)$/, async (ctx) => {
   await ctx.answerCbQuery(`✅ Saved ${rec.name}!`);
 
   // Replace that button with a ✅ tick
-  const currentMarkup = (ctx.callbackQuery.message as any)?.reply_markup?.inline_keyboard as any[][] | undefined;
+  const cbq = ctx.callbackQuery as any;
+  const currentMarkup = cbq.message?.reply_markup?.inline_keyboard as any[][] | undefined;
   if (currentMarkup) {
-    const updated = currentMarkup.map(row =>
-      row.map(btn => btn.callback_data === ctx.callbackQuery.data
+    const updated = currentMarkup.map((row: any[]) =>
+      row.map((btn: any) => btn.callback_data === cbq.data
         ? { text: `✅ #${idx + 1} Saved`, callback_data: `noop` }
         : btn)
     );
