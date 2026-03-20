@@ -366,7 +366,7 @@ async function fetchTitleViaJina(url: string): Promise<string | null> {
   }
 }
 
-async function fetchTitle(url: string): Promise<string> {
+async function fetchTitle(url: string): Promise<string | null> {
   // 1. Slug from URL path — instant, no network
   const slugName = extractNameFromUrl(url);
   if (slugName) return slugName;
@@ -407,8 +407,8 @@ async function fetchTitle(url: string): Promise<string> {
   const claudeName = await fetchTitleViaClaude(url);
   if (claudeName) return claudeName;
 
-  // 10. Meaningful fallback from URL structure
-  return urlFallbackTitle(url);
+  // 10. Give up — caller will ask the user
+  return null;
 }
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -628,6 +628,10 @@ bot.command('list', async (ctx) => {
   await listCategory(ctx, category);
 });
 
+// Track bot messages waiting for a user-provided name
+// key: `${chatId}:${botMessageId}`, value: url awaiting a label
+const pendingRenames = new Map<string, string>();
+
 const URL_REGEX = /https?:\/\/[^\s]+|www\.[^\s]+/i;
 
 const HOTEL_KEYWORDS = ['agoda', 'booking', 'airbnb', 'trip.com', 'hotels.com', 'expedia', 'hostelworld'];
@@ -684,6 +688,24 @@ bot.on('message', async (ctx) => {
     return;
   }
 
+  // ── Pending rename reply handler ───────────────────────────────────────────
+  const replyToId = 'reply_to_message' in ctx.message ? ctx.message.reply_to_message?.message_id : undefined;
+  if (replyToId) {
+    const pendingKey = `${chatId}:${replyToId}`;
+    const pendingUrl = pendingRenames.get(pendingKey);
+    if (pendingUrl) {
+      const name = text.trim();
+      await supabase
+        .from('trip_links')
+        .update({ label: name })
+        .eq('chat_id', chatId)
+        .eq('url', pendingUrl);
+      pendingRenames.delete(pendingKey);
+      ctx.reply(`✅ Got it! Saved as "<b>${name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</b>" 🎉`, { parse_mode: 'HTML' });
+      return;
+    }
+  }
+
   // ── URL save handler ───────────────────────────────────────────────────────
   if (!URL_REGEX.test(text)) return;
 
@@ -693,7 +715,7 @@ bot.on('message', async (ctx) => {
 
   const { error } = await supabase
     .from('trip_links')
-    .insert({ chat_id: chatId, user_name: userName, message_text: text, url, category, label });
+    .insert({ chat_id: chatId, user_name: userName, message_text: text, url, category, label: label ?? null });
 
   if (error) {
     console.error('Supabase insert error:', error.message);
@@ -702,8 +724,18 @@ bot.on('message', async (ctx) => {
   }
 
   const categoryEmoji: Record<string, string> = { hotel: '⛺️', flight: '✈️', activity: '🔫' };
-  const safeLabel = label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  ctx.reply(`${categoryEmoji[category]} Saved <b>${safeLabel}</b>`, { parse_mode: 'HTML' });
+
+  if (!label) {
+    const categoryWord: Record<string, string> = { hotel: 'hotel', flight: 'flight', activity: 'activity' };
+    const sent = await ctx.reply(
+      `${categoryEmoji[category]} Link saved! Give this ${categoryWord[category]} a name to remember it by 📝\n<i>(just reply to this message)</i>`,
+      { parse_mode: 'HTML' }
+    );
+    pendingRenames.set(`${chatId}:${sent.message_id}`, url);
+  } else {
+    const safeLabel = label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    ctx.reply(`${categoryEmoji[category]} Saved <b>${safeLabel}</b>`, { parse_mode: 'HTML' });
+  }
 });
 
 bot.launch();
