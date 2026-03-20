@@ -135,6 +135,7 @@ async function fetchOgTitle(url: string): Promise<string | null> {
 async function fetchTitle(url: string): Promise<string> {
   // Try URL slug extraction first (works for KKday, some Klook)
   const slugName = extractNameFromUrl(url);
+  console.log('slugName:', slugName, 'for', url);
   if (slugName) return slugName;
 
   // Try jsonlink first — no API key needed
