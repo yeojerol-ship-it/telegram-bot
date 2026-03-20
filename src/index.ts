@@ -81,6 +81,23 @@ async function fetchKlookTitle(url: string): Promise<string | null> {
   }
 }
 
+function extractNameFromUrl(url: string): string | null {
+  try {
+    const { hostname, pathname } = new URL(url.startsWith('http') ? url : 'https://' + url);
+    // KKday: kkday.com/en-sg/product/2287-activity-name-here
+    if (hostname.includes('kkday')) {
+      const match = pathname.match(/\/product\/\d+-(.+)/i);
+      if (match) return match[1].replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    }
+    // Klook: klook.com/activity/12345-activity-name-here
+    if (hostname.includes('klook')) {
+      const match = pathname.match(/\/activity\/\d+-([^/?]+)/i);
+      if (match) return match[1].replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    }
+  } catch {}
+  return null;
+}
+
 async function fetchOgTitle(url: string): Promise<string | null> {
   try {
     const fullUrl = url.startsWith('http') ? url : 'https://' + url;
@@ -106,6 +123,10 @@ async function fetchOgTitle(url: string): Promise<string | null> {
 }
 
 async function fetchTitle(url: string): Promise<string> {
+  // Try URL slug extraction first (works for KKday, some Klook)
+  const slugName = extractNameFromUrl(url);
+  if (slugName) return slugName;
+
   // Try jsonlink first — no API key needed
   const jsonlinkName = await fetchTitleViaJsonLink(url);
   if (jsonlinkName) return jsonlinkName;
