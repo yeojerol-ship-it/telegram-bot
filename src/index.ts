@@ -19,10 +19,11 @@ bot.command('start', (ctx) => {
 bot.command('help', (ctx) => {
   ctx.reply(
     "Here's what I can do:\n\n" +
-    "📎 Drop any hotel, flight, or activity link — I'll save it automatically\n\n" +
+    "📎 Drop any hotel, flight, activity, or TikTok link — I'll save it automatically\n\n" +
     "/list hotels — see all saved hotels\n" +
     "/list flights — see all saved flights\n" +
     "/list activities — see all saved activities\n" +
+    "/list tiktok — see all saved TikToks\n" +
     "/remove hotels 2 — remove item #2 from the hotels list"
   );
 });
@@ -483,14 +484,16 @@ const CATEGORY_LABEL: Record<string, string> = {
   hotel: '⛺️ Hotels',
   flight: '✈️ Flights',
   activity: '🦀 Activities',
-  food: '🍽️ Food & Drinks',
+  food: '🍤 Food',
+  tiktok: '📱 TikToks',
 };
 
 const CATEGORY_EMOJI: Record<string, string> = {
   hotel: '⛺️',
   flight: '✈️',
   activity: '🦀',
-  food: '🍽️',
+  food: '🍤',
+  tiktok: '📱',
 };
 
 const categoryMap: Record<string, string> = {
@@ -508,6 +511,8 @@ const categoryMap: Record<string, string> = {
   restaurants: 'food',
   'food & drinks': 'food',
   eat: 'food',
+  tiktok: 'tiktok',
+  tiktoks: 'tiktok',
 };
 
 // Pending recommendations per chat: chatId → list of recommendations
@@ -570,13 +575,65 @@ Suggest 5 specific, real places. Reply with a JSON array only — no explanation
   return lines.join('\n\n') + '\n\n<i>To save any of these, say "@bot save 1" (or the number)</i>';
 }
 
+// ── TikTok support ───────────────────────────────────────────────────────────
+
+function isTikTokUrl(url: string): boolean {
+  try {
+    const { hostname } = new URL(url.startsWith('http') ? url : 'https://' + url);
+    return hostname === 'tiktok.com' || hostname.endsWith('.tiktok.com') || hostname === 'vm.tiktok.com';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Infers a title + subtitle for a TikTok link from the surrounding message text.
+ * Designed to be swappable: replace the body with real scraping or video-AI later.
+ */
+async function summarizeTikTokContent(
+  url: string,
+  messageText: string,
+): Promise<{ title: string; subtitle: string }> {
+  const FALLBACK = { title: 'TikTok link', subtitle: 'Shared TikTok content' };
+
+  // Strip the URL itself from the message so we only use human context
+  const context = messageText.replace(/https?:\/\/\S+/g, '').trim();
+  if (!context) return FALLBACK;
+
+  try {
+    const response = await anthropic.messages.create({
+      model: 'claude-opus-4-6',
+      max_tokens: 80,
+      messages: [{
+        role: 'user',
+        content: `A TikTok video was shared with this caption or message: "${context}"
+
+Generate:
+Line 1: A short title (3–6 words) describing what the TikTok is about
+Line 2: One punchy sentence with more detail
+
+Reply with only these 2 lines, no labels or numbering.`,
+      }],
+    });
+    const block = response.content[0];
+    if (block.type !== 'text') return FALLBACK;
+    const [titleLine, subtitleLine] = block.text.trim().split('\n').map(l => l.trim()).filter(Boolean);
+    return {
+      title: titleLine || FALLBACK.title,
+      subtitle: subtitleLine || FALLBACK.subtitle,
+    };
+  } catch {
+    return FALLBACK;
+  }
+}
+
 // ── Shared list logic ────────────────────────────────────────────────────────
 
 async function listCategory(ctx: any, category: string) {
   const chatId = ctx.chat.id.toString();
   const { data, error } = await supabase
     .from('trip_links')
-    .select('url, user_name, label')
+    .select('url, user_name, label, subtitle')
     .eq('chat_id', chatId)
     .eq('category', category)
     .order('created_at', { ascending: true });
@@ -603,15 +660,16 @@ async function listCategory(ctx: any, category: string) {
     flight: 'View flight',
     activity: 'View activity',
     food: 'View on Maps',
+    tiktok: 'Watch on TikTok',
   };
 
   const isMapsUrl = (url: string) => url.includes('google.com/maps');
 
-  // Re-fetch label for entries with missing/generic names and update in DB
+  // Re-fetch label for entries with missing/generic names and update in DB (skip TikTok)
   await Promise.all(
     unique.map(async (row) => {
       const needsRefetch = !row.label || row.label === 'Unnamed' || isGenericTitle(row.label);
-      if (!needsRefetch || isMapsUrl(row.url)) return;
+      if (!needsRefetch || isMapsUrl(row.url) || category === 'tiktok') return;
       const freshLabel = await fetchTitle(row.url);
       if (freshLabel && freshLabel !== row.label) {
         row.label = freshLabel;
@@ -624,6 +682,14 @@ async function listCategory(ctx: any, category: string) {
     unique.map(async (row, i) => {
       const name = row.label || 'Unnamed';
       const safeName = name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+      // TikTok: show title + subtitle, no price/Maps
+      if (category === 'tiktok') {
+        const safeSubtitle = (row.subtitle || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const subtitleText = safeSubtitle ? `\n<i>${safeSubtitle}</i>` : '';
+        return `📱 <b>${i + 1}. ${safeName}</b>${subtitleText}\n<a href="${row.url}">▶️ ${viewLabel.tiktok}</a>\nShared by ${row.user_name}`;
+      }
+
       const { tagline, price } = await getSummary(name, category);
       const safeTagline = tagline.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       const summaryText = safeTagline ? `\n<i>${safeTagline}</i>` : '';
@@ -708,7 +774,7 @@ async function parseIntent(text: string): Promise<Intent> {
 Message: "${text}"
 
 Intents:
-- List saved links: {"action":"list","category":"hotel"|"flight"|"activity"|"food"}
+- List saved links: {"action":"list","category":"hotel"|"flight"|"activity"|"food"|"tiktok"}
 - Remove one or more items (support "2 and 3", "2, 3", "2 3"): {"action":"remove","category":"hotel"|"flight"|"activity"|"food","numbers":[<integers>]}
 - Ask for recommendations: {"action":"recommend","query":"<full query>"}
 - Save one or more recommendations by number or name: {"action":"save_rec","indices":[<numbers>],"names":[<names or empty>]}
@@ -964,16 +1030,23 @@ bot.on('message', async (ctx) => {
         "/list flights — saved flights\n" +
         "/list activities — saved activities\n" +
         "/list food — saved food spots\n" +
+        "/list tiktok — saved TikToks\n" +
         "/remove hotels 2 — remove item #2\n\n" +
         "Or just @ me:\n" +
         '• "@bot add Shibuya Crossing Tokyo"\n' +
         '• "@bot recommend street food in Bangkok"\n' +
         '• "@bot things to do in Bali"\n' +
         '• "@bot save 2" — saves recommendation #2\n' +
+        '• "@bot show me the tiktoks"\n' +
         '• "@bot show me the hotels"'
       );
     } else {
-      ctx.reply("Not sure what you mean 🤔 Try \"@bot recommend things to do in Tokyo\" or \"@bot show me the hotels\"");
+      ctx.reply(
+        "Not quite sure what you mean 🤔✨\nTry something like:\n\n" +
+        "👉 \"@bot recommend things to do in Tokyo 🗼\"\n" +
+        "👉 \"@bot show me hotels 🏨\"\n\n" +
+        "I'm here to help you plan your trip—just give me a hint! ✈️🌍"
+      );
     }
     return;
   }
@@ -1000,6 +1073,31 @@ bot.on('message', async (ctx) => {
   if (!URL_REGEX.test(text)) return;
 
   const url = text.match(URL_REGEX)![0];
+
+  // ── TikTok fast path ───────────────────────────────────────────────────────
+  if (isTikTokUrl(url)) {
+    const { title, subtitle } = await summarizeTikTokContent(url, text);
+    const { error: tikError } = await supabase.from('trip_links').insert({
+      chat_id: chatId,
+      user_name: userName,
+      message_text: text,
+      url,
+      source: 'tiktok',
+      category: 'tiktok',
+      label: title,
+      subtitle,
+    });
+    if (tikError) {
+      console.error('TikTok insert error:', tikError.message);
+      ctx.reply('Failed to save TikTok link');
+      return;
+    }
+    const safeTitle = title.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const safeSubtitle = subtitle.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    ctx.reply(`📱 TikTok saved!\n<b>${safeTitle}</b>\n<i>${safeSubtitle}</i>`, { parse_mode: 'HTML' });
+    return;
+  }
+
   const [category, label] = await Promise.all([categorize(url), fetchTitle(url)]);
 
   const { error } = await supabase
