@@ -81,10 +81,17 @@ async function fetchKlookTitle(url: string): Promise<string | null> {
 function extractNameFromUrl(url: string): string | null {
   try {
     const { hostname, pathname } = new URL(url.startsWith('http') ? url : 'https://' + url);
-    // KKday: kkday.com/en-sg/product/2287-activity-name-here
     if (hostname.includes('kkday')) {
-      const match = pathname.match(/\/product\/\d+-(.+)/i);
-      if (match) return match[1].replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      // /product/2287-activity-name
+      const productMatch = pathname.match(/\/product\/\d+-([^/?]+)/i);
+      if (productMatch) return productMatch[1].replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      // /product/productlist/disney%20cruise
+      const listMatch = pathname.match(/\/productlist\/([^/?]+)/i);
+      if (listMatch) return decodeURIComponent(listMatch[1]).replace(/[+-]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      // /cruises/528868 or /en-sg/product/528868 — use last path segment as fallback label
+      const segments = pathname.split('/').filter(Boolean);
+      const last = segments[segments.length - 1];
+      if (last && !/^\d+$/.test(last)) return decodeURIComponent(last).replace(/[+-]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
     }
     // Klook: klook.com/activity/12345-activity-name-here
     if (hostname.includes('klook')) {
