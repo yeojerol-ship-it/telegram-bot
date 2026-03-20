@@ -335,10 +335,12 @@ async function listCategory(ctx: any, category: string) {
   const lines = await Promise.all(
     unique.map(async (row, i) => {
       const name = row.label || 'Unnamed';
+      const safeName = name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       const { tagline, price } = await getSummary(name, category);
-      const summaryText = tagline ? `\n<i>${tagline}</i>` : '';
+      const safeTagline = tagline.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const summaryText = safeTagline ? `\n<i>${safeTagline}</i>` : '';
       const priceText = price ? `\n💰 ${price}` : '';
-      return `<b>${i + 1}. ${name}</b>${summaryText}${priceText}\n<a href="${row.url}">🔗 ${viewLabel[category]}</a>\nMentioned by ${row.user_name}`;
+      return `<b>${i + 1}. ${safeName}</b>${summaryText}${priceText}\n<a href="${row.url}">🔗 ${viewLabel[category]}</a>\nMentioned by ${row.user_name}`;
     })
   );
 
@@ -523,7 +525,8 @@ bot.on('message', async (ctx) => {
   }
 
   const categoryEmoji: Record<string, string> = { hotel: '⛺️', flight: '✈️', activity: '🔫' };
-  ctx.reply(`${categoryEmoji[category]} Saved <b>${label}</b>`, { parse_mode: 'HTML' });
+  const safeLabel = label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  ctx.reply(`${categoryEmoji[category]} Saved <b>${safeLabel}</b>`, { parse_mode: 'HTML' });
 });
 
 bot.launch();
