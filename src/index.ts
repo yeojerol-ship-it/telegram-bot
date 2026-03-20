@@ -464,14 +464,14 @@ Reply with only these 2 lines, no labels.`,
 const CATEGORY_LABEL: Record<string, string> = {
   hotel: '⛺️ Hotels',
   flight: '✈️ Flights',
-  activity: '🎯 Activities',
+  activity: '🦀 Activities',
   food: '🍽️ Food & Drinks',
 };
 
 const CATEGORY_EMOJI: Record<string, string> = {
   hotel: '⛺️',
   flight: '✈️',
-  activity: '🎯',
+  activity: '🦀',
   food: '🍽️',
 };
 
@@ -588,6 +588,19 @@ async function listCategory(ctx: any, category: string) {
   };
 
   const isMapsUrl = (url: string) => url.includes('google.com/maps');
+
+  // Re-fetch label for entries with missing/generic names and update in DB
+  await Promise.all(
+    unique.map(async (row) => {
+      const needsRefetch = !row.label || row.label === 'Unnamed' || isGenericTitle(row.label);
+      if (!needsRefetch || isMapsUrl(row.url)) return;
+      const freshLabel = await fetchTitle(row.url);
+      if (freshLabel && freshLabel !== row.label) {
+        row.label = freshLabel;
+        await supabase.from('trip_links').update({ label: freshLabel }).eq('chat_id', chatId).eq('url', row.url);
+      }
+    })
+  );
 
   const lines = await Promise.all(
     unique.map(async (row, i) => {
