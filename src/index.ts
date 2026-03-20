@@ -147,11 +147,6 @@ async function fetchTitle(url: string): Promise<string> {
     if (klookName) return klookName;
   }
 
-  // Try plain HTTP fetch for og:title
-  const ogName = await fetchOgTitle(url);
-  if (ogName) return ogName;
-
-  // Last resort: plain fetch for og:title
   const ogName = await fetchOgTitle(url);
   return ogName || 'Unnamed';
 }
