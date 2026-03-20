@@ -692,6 +692,11 @@ async function fetchTikTokOEmbed(url: string): Promise<{ title: string; author: 
  * Priority: oEmbed API → caption text → username hint → fallback.
  * Designed to be swappable: replace with richer scraping or video-AI later.
  */
+/** Remove emoji characters so titles stay plain text */
+function stripEmoji(text: string): string {
+  return text.replace(/\p{Emoji_Presentation}/gu, '').replace(/\s+/g, ' ').trim();
+}
+
 async function summarizeTikTokContent(
   url: string,
   messageText: string,
@@ -732,9 +737,9 @@ Reply with only these 2 lines, no labels.`,
         const [titleLine, subtitleLine] = block.text.trim().split('\n').map(l => l.trim()).filter(Boolean);
         if (titleLine) {
           return {
-            title: titleLine,
+            title: stripEmoji(titleLine),
             subtitle: subtitleLine
-              ? subtitleLine.slice(0, 50)
+              ? stripEmoji(subtitleLine).slice(0, 50)
               : author ? `By @${author}` : FALLBACK.subtitle,
           };
         }
@@ -808,7 +813,7 @@ async function listCategory(ctx: any, category: string) {
       if (category === 'tiktok') {
         const safeSubtitle = (row.subtitle || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         const subtitleText = safeSubtitle ? `\n<i>${safeSubtitle}</i>` : '';
-        return `<b>${i + 1}. 🎥 TikTok</b>${subtitleText}\n<a href="${row.url}">▶️ ${viewLabel.tiktok}</a>\nShared by ${row.user_name}`;
+        return `🎥 <b>${i + 1}. ${safeName}</b>${subtitleText}\n<a href="${row.url}">▶️ ${viewLabel.tiktok}</a>\nShared by ${row.user_name}`;
       }
 
       const { tagline, price } = await getSummary(name, category);
@@ -1247,7 +1252,7 @@ bot.on('message', async (ctx) => {
     }
     const safeTitle = title.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const safeSubtitle = subtitle.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    ctx.reply(`📱 TikTok saved!\n<b>🎥 TikTok</b>\n<i>${safeSubtitle}</i>`, { parse_mode: 'HTML' });
+    ctx.reply(`🎥 TikTok saved!\n<b>${safeTitle}</b>\n<i>${safeSubtitle}</i>`, { parse_mode: 'HTML' });
     return;
   }
 
