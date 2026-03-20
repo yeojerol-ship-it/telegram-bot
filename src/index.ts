@@ -308,17 +308,19 @@ function urlFallbackTitle(url: string): string {
   }
 }
 
-const GENERIC_BRANDS = ['kkday', 'klook', 'agoda', 'booking', 'expedia', 'airbnb', 'tripadvisor'];
-const GENERIC_PHRASES = ['book tours', 'book online', 'book activities', 'home page', 'explore. dream', 'things to do', 'best price'];
+// Only brands that ALWAYS return generic/tagline titles (CAPTCHA-blocked, no SSR)
+const CAPTCHA_BRANDS = ['kkday', 'klook'];
+const GENERIC_PHRASES = ['book tours', 'book online', 'book activities', 'home page', 'explore. dream'];
 
 function isGenericTitle(title: string): boolean {
   const lower = title.toLowerCase().trim();
-  // Brand name alone or with short suffix
-  if (GENERIC_BRANDS.some(b => lower === b || lower === b + '.com')) return true;
-  // Title starts with brand: "KKday - ..." or "Klook | ..."
-  if (GENERIC_BRANDS.some(b => lower.startsWith(b + ' ') || lower.startsWith(b + '-') || lower.startsWith(b + '|'))) return true;
-  // Title ends with brand: "Some tagline - KKday" or "Some tagline | Klook"
-  if (GENERIC_BRANDS.some(b => lower.endsWith('- ' + b) || lower.endsWith('| ' + b) || lower.endsWith(' ' + b))) return true;
+  if (lower.length < 3) return true;
+  // Exact domain match e.g. "kkday.com"
+  if (CAPTCHA_BRANDS.some(b => lower === b || lower === b + '.com')) return true;
+  // Title is just the brand: "KKday - tagline" or "KKday | tagline"
+  if (CAPTCHA_BRANDS.some(b => lower.startsWith(b + ' ') || lower.startsWith(b + '-') || lower.startsWith(b + '|'))) return true;
+  // Title ends with the brand: "Explore. Dream. Discover - KKday"
+  if (CAPTCHA_BRANDS.some(b => lower.endsWith('- ' + b) || lower.endsWith('| ' + b) || lower.endsWith(' ' + b))) return true;
   // Generic marketing phrases
   if (GENERIC_PHRASES.some(p => lower.includes(p))) return true;
   return false;
@@ -380,33 +382,29 @@ async function fetchTitle(url: string): Promise<string | null> {
   const slugName = extractNameFromUrl(url);
   if (slugName) return slugName;
 
-  // 2. Claude web_search — searches the web index where KKday/Klook are already indexed correctly
-  const claudeWebName = await fetchTitleViaClaudeSearch(url);
-  if (claudeWebName) return claudeWebName;
-
-  // 3. DuckDuckGo search — uses DDG's crawl index which has the real page title
-  const ddgName = await fetchTitleViaDDG(url);
-  if (ddgName) return ddgName;
-
-  // 3. Wayback Machine — fetches a cached snapshot with full HTML
-  const waybackName = await fetchTitleViaWayback(url);
-  if (waybackName) return waybackName;
-
-  // 4. Social media crawler UAs — sites serve og:title to Facebook/Twitter/Telegram bots
-  const socialName = await fetchTitleViaSocialCrawler(url);
-  if (socialName) return socialName;
-
-  // 5. Jina AI Reader — renders JS pages, returns clean markdown with real title
-  const jinaName = await fetchTitleViaJina(url);
-  if (jinaName && !isGenericTitle(jinaName)) return jinaName;
-
-  // 6. og:title via plain fetch (SSR sites like Booking/Agoda)
+  // 2. og:title — works immediately for SSR sites (Booking.com, Agoda, Airbnb, Skyscanner…)
   const ogName = await fetchOgTitle(url);
   if (ogName && !isGenericTitle(ogName)) return ogName;
 
-  // 7. jsonlink
-  const jsonlinkName = await fetchTitleViaJsonLink(url);
-  if (jsonlinkName) return jsonlinkName;
+  // 3. Social media crawler UAs — some sites block plain fetch but allow Facebook/Telegram bots
+  const socialName = await fetchTitleViaSocialCrawler(url);
+  if (socialName) return socialName;
+
+  // 4. Jina AI Reader — renders JS-heavy pages
+  const jinaName = await fetchTitleViaJina(url);
+  if (jinaName && !isGenericTitle(jinaName)) return jinaName;
+
+  // 5. DuckDuckGo search index — good for CAPTCHA-blocked sites like KKday
+  const ddgName = await fetchTitleViaDDG(url);
+  if (ddgName) return ddgName;
+
+  // 6. Wayback Machine cached snapshot
+  const waybackName = await fetchTitleViaWayback(url);
+  if (waybackName) return waybackName;
+
+  // 7. Claude web_search — last AI-powered attempt
+  const claudeWebName = await fetchTitleViaClaudeSearch(url);
+  if (claudeWebName && !isGenericTitle(claudeWebName)) return claudeWebName;
 
   // 8. Bing API (if key set)
   const bingName = await fetchTitleViaBing(url);
