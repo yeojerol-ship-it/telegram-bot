@@ -188,6 +188,39 @@ ${context ? `Data:\n${context}` : ''}`,
   }
 }
 
+const GENERIC_TITLES = ['kkday', 'klook', 'agoda', 'booking', 'book tours', 'book online', 'home page', 'homepage'];
+
+function isGenericTitle(title: string): boolean {
+  const lower = title.toLowerCase().trim();
+  return GENERIC_TITLES.some(t => lower === t || lower.startsWith(t + ' -') || lower.startsWith(t + '.'));
+}
+
+async function fetchTitleViaSocialCrawler(url: string): Promise<string | null> {
+  const userAgents = [
+    'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
+    'Twitterbot/1.0',
+    'TelegramBot (like TwitterBot)',
+  ];
+  const fullUrl = url.startsWith('http') ? url : 'https://' + url;
+  for (const ua of userAgents) {
+    try {
+      const res = await fetch(fullUrl, {
+        headers: { 'User-Agent': ua, 'Accept': 'text/html' },
+        signal: AbortSignal.timeout(10000),
+        redirect: 'follow',
+      });
+      const html = await res.text();
+      const ogTitle = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1]
+        ?? html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i)?.[1];
+      console.log(`social crawler (${ua.split('/')[0]}):`, ogTitle);
+      if (ogTitle && !isGenericTitle(ogTitle)) return ogTitle.trim();
+    } catch (e) {
+      console.log('social crawler error:', e);
+    }
+  }
+  return null;
+}
+
 async function fetchTitleViaJina(url: string): Promise<string | null> {
   try {
     const fullUrl = url.startsWith('http') ? url : 'https://' + url;
@@ -218,23 +251,28 @@ async function fetchTitle(url: string): Promise<string> {
   const slugName = extractNameFromUrl(url);
   if (slugName) return slugName;
 
-  // 2. Jina AI Reader — renders JS, returns clean markdown with real title
+  // 2. Social media crawler UAs (facebookexternalhit, Twitterbot, TelegramBot)
+  //    Sites like KKday/Klook serve proper og:title to these for link previews
+  const socialName = await fetchTitleViaSocialCrawler(url);
+  if (socialName) return socialName;
+
+  // 3. Jina AI Reader — renders JS pages, returns clean markdown with real title
   const jinaName = await fetchTitleViaJina(url);
-  if (jinaName) return jinaName;
+  if (jinaName && !isGenericTitle(jinaName)) return jinaName;
 
-  // 3. og:title via plain fetch (fast for SSR sites like Booking/Agoda)
+  // 4. og:title via plain fetch (SSR sites like Booking/Agoda)
   const ogName = await fetchOgTitle(url);
-  if (ogName) return ogName;
+  if (ogName && !isGenericTitle(ogName)) return ogName;
 
-  // 4. jsonlink
+  // 5. jsonlink
   const jsonlinkName = await fetchTitleViaJsonLink(url);
   if (jsonlinkName) return jsonlinkName;
 
-  // 5. Bing (if key set)
+  // 6. Bing (if key set)
   const bingName = await fetchTitleViaBing(url);
   if (bingName) return bingName;
 
-  // 6. Claude reads __NEXT_DATA__ / raw HTML as last resort
+  // 7. Claude reads __NEXT_DATA__ / raw HTML as last resort
   return await fetchTitleViaClaude(url);
 }
 
@@ -462,6 +500,10 @@ const FLIGHT_KEYWORDS = ['skyscanner', 'airasia', 'thaivietjet', 'vietjetair', '
 
 function categorize(url: string): string {
   const lower = url.toLowerCase();
+  // Check activity path patterns first — overrides domain-level hotel keywords
+  // e.g. agoda.com/activities/..., booking.com/attractions/...
+  if (/\/(activities|attractions|things-to-do|experiences|tours?)\//.test(lower)) return 'activity';
+  if (/[?&](activityId|attractionId|tourId)=/.test(lower)) return 'activity';
   if (HOTEL_KEYWORDS.some((k) => lower.includes(k))) return 'hotel';
   if (FLIGHT_KEYWORDS.some((k) => lower.includes(k))) return 'flight';
   return 'activity';
