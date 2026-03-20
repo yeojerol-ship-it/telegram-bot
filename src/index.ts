@@ -899,7 +899,7 @@ type Intent =
   | { action: 'remove_all'; category: string }
   | { action: 'recommend'; query: string }
   | { action: 'save_rec'; indices?: number[]; names?: string[] }
-  | { action: 'add'; query: string }
+  | { action: 'add'; queries: string[]; category?: string }
   | { action: 'help' }
   | { action: 'unknown' };
 
@@ -920,7 +920,7 @@ Intents:
 - Remove ALL items from a category ("remove all", "delete everything", "clear hotels", "wipe tiktoks", etc.): {"action":"remove_all","category":"hotel"|"flight"|"activity"|"food"|"tiktok"}
 - Ask for recommendations: {"action":"recommend","query":"<full query>"}
 - Save one or more recommendations by number or name: {"action":"save_rec","indices":[<numbers>],"names":[<names or empty>]}
-- Manually add a place (add, save, remember a named place/restaurant/attraction): {"action":"add","query":"<place name and location>"}
+- Add one or more places manually (add, save, remember — can be a list): {"action":"add","queries":["<place 1>","<place 2>",...],"category":"hotel"|"flight"|"activity"|"food"|null} — extract category only if clearly stated, otherwise null
 - Help: {"action":"help"}
 - Other: {"action":"unknown"}
 
@@ -982,6 +982,12 @@ interface AddState {
   userName: string;
 }
 const pendingAdd = new Map<string, AddState>(); // chatId → state
+
+interface BulkAddState {
+  places: Array<{ name: string; mapsUrl: string }>;
+  userName: string;
+}
+const pendingBulkAdd = new Map<string, BulkAddState>(); // chatId → state
 
 async function searchPlace(query: string): Promise<{ name: string; mapsUrl: string } | null> {
   try {
@@ -1056,6 +1062,38 @@ bot.action(/^add_cat:(\w+):(.+)$/, async (ctx) => {
   await ctx.answerCbQuery('Saved! ✅');
 });
 
+
+bot.action(/^bulk_add_cat:(\w+):(.+)$/, async (ctx) => {
+  const category = ctx.match[1];
+  const chatId = ctx.match[2];
+  const state = pendingBulkAdd.get(chatId);
+  if (!state) { await ctx.answerCbQuery(); return; }
+
+  await Promise.all(state.places.map(p =>
+    supabase.from('trip_links').insert({
+      chat_id: chatId, user_name: state.userName,
+      message_text: p.name, url: p.mapsUrl, category, label: p.name,
+    })
+  ));
+
+  pendingBulkAdd.delete(chatId);
+  const lines = state.places.map(p => {
+    const safe = p.name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return `• <b>${safe}</b> — <a href="${p.mapsUrl}">📍 Maps</a>`;
+  }).join('\n');
+  await ctx.editMessageText(
+    `${CATEGORY_EMOJI[category] || '📍'} Saved ${state.places.length} place${state.places.length > 1 ? 's' : ''} to ${CATEGORY_LABEL[category]}!\n\n${lines}`,
+    { parse_mode: 'HTML', link_preview_options: { is_disabled: true } } as any
+  );
+  await ctx.answerCbQuery('Saved! ✅');
+});
+
+bot.action(/^bulk_add_cancel:(.+)$/, async (ctx) => {
+  const chatId = ctx.match[1];
+  pendingBulkAdd.delete(chatId);
+  await ctx.editMessageText('Cancelled — nothing was saved 👍');
+  await ctx.answerCbQuery();
+});
 
 const URL_REGEX = /https?:\/\/[^\s]+|www\.[^\s]+/i;
 
@@ -1157,22 +1195,82 @@ bot.on('message', async (ctx) => {
         parse_mode: 'HTML', link_preview_options: { is_disabled: true },
       });
     } else if (intent.action === 'add') {
-      const result = await searchPlace(intent.query);
-      if (!result) {
-        ctx.reply(`Couldn't find "${intent.query}" — try being more specific (e.g. "Shibuya Crossing Tokyo")`);
+      const queries = intent.queries ?? [];
+      if (queries.length === 0) {
+        ctx.reply("Which place would you like to add? Try: \"@bot add Shibuya Crossing Tokyo\"");
         return;
       }
-      pendingAdd.set(chatId, { name: result.name, mapsUrl: result.mapsUrl, userName });
-      const safeName = result.name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+      // Search all places in parallel
+      const results = await Promise.all(queries.map(q => searchPlace(q)));
+      const found = results.map((r, i) => ({ query: queries[i], result: r })).filter(x => x.result !== null) as Array<{ query: string; result: { name: string; mapsUrl: string } }>;
+      const notFound = results.map((r, i) => queries[i]).filter((_, i) => results[i] === null);
+
+      if (found.length === 0) {
+        ctx.reply(`Couldn't find any of those places — try being more specific (e.g. "Shibuya Crossing Tokyo")`);
+        return;
+      }
+
+      // Single place — use existing single-add confirm flow
+      if (found.length === 1 && !intent.category) {
+        const { name, mapsUrl } = found[0].result;
+        pendingAdd.set(chatId, { name, mapsUrl, userName });
+        const safeName = name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const notFoundNote = notFound.length > 0 ? `\n\n<i>Couldn't find: ${notFound.join(', ')}</i>` : '';
+        ctx.reply(
+          `Found <b>${safeName}</b>\n<a href="${mapsUrl}">📍 View on Maps</a>\n\nIs this the right place?${notFoundNote}`,
+          {
+            parse_mode: 'HTML',
+            link_preview_options: { is_disabled: true },
+            reply_markup: { inline_keyboard: [[
+              { text: '👍 Yes, that\'s it!', callback_data: `add_confirm:${chatId}` },
+              { text: '👎 Not this one', callback_data: `add_cancel:${chatId}` },
+            ]] },
+          } as any
+        );
+        return;
+      }
+
+      // Multiple places — save to state and show summary + category picker
+      pendingBulkAdd.set(chatId, { places: found.map(x => x.result), userName });
+
+      const placeLines = found.map(x => {
+        const safe = x.result.name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return `• <b>${safe}</b> — <a href="${x.result.mapsUrl}">📍 Maps</a>`;
+      }).join('\n');
+      const notFoundNote = notFound.length > 0 ? `\n\n<i>Couldn't find: ${notFound.join(', ')}</i>` : '';
+
+      // If category already specified, save immediately after confirmation
+      if (intent.category && ['hotel', 'flight', 'activity', 'food'].includes(intent.category)) {
+        const cat = intent.category;
+        await Promise.all(found.map(x =>
+          supabase.from('trip_links').insert({
+            chat_id: chatId, user_name: userName,
+            message_text: x.result.name, url: x.result.mapsUrl, category: cat, label: x.result.name,
+          })
+        ));
+        pendingBulkAdd.delete(chatId);
+        ctx.reply(
+          `${CATEGORY_EMOJI[cat] || '📍'} Saved ${found.length} place${found.length > 1 ? 's' : ''} to ${CATEGORY_LABEL[cat]}!\n\n${placeLines}${notFoundNote}`,
+          { parse_mode: 'HTML', link_preview_options: { is_disabled: true } }
+        );
+        return;
+      }
+
+      // No category — ask which one
       ctx.reply(
-        `Found <b>${safeName}</b>\n<a href="${result.mapsUrl}">📍 View on Maps</a>\n\nIs this the right place?`,
+        `Found ${found.length} place${found.length > 1 ? 's' : ''}:\n\n${placeLines}${notFoundNote}\n\nWhich category should I save them to?`,
         {
           parse_mode: 'HTML',
           link_preview_options: { is_disabled: true },
-          reply_markup: { inline_keyboard: [[
-            { text: '👍 Yes, that\'s it!', callback_data: `add_confirm:${chatId}` },
-            { text: '👎 Not this one', callback_data: `add_cancel:${chatId}` },
-          ]] },
+          reply_markup: { inline_keyboard: [
+            [
+              { text: '⛺️ Hotel', callback_data: `bulk_add_cat:hotel:${chatId}` },
+              { text: '🍤 Food', callback_data: `bulk_add_cat:food:${chatId}` },
+              { text: '🦀 Activity', callback_data: `bulk_add_cat:activity:${chatId}` },
+            ],
+            [{ text: '❌ Cancel', callback_data: `bulk_add_cancel:${chatId}` }],
+          ] },
         } as any
       );
     } else if (intent.action === 'help') {
