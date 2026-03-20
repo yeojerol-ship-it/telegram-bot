@@ -466,7 +466,15 @@ Reply with only these 2 lines, no labels.`,
 const CATEGORY_LABEL: Record<string, string> = {
   hotel: '⛺️ Hotels',
   flight: '✈️ Flights',
-  activity: '🔫 Activities',
+  activity: '🎯 Activities',
+  food: '🍽️ Food & Drinks',
+};
+
+const CATEGORY_EMOJI: Record<string, string> = {
+  hotel: '⛺️',
+  flight: '✈️',
+  activity: '🎯',
+  food: '🍽️',
 };
 
 const categoryMap: Record<string, string> = {
@@ -478,7 +486,73 @@ const categoryMap: Record<string, string> = {
   activity: 'activity',
   attraction: 'activity',
   attractions: 'activity',
+  food: 'food',
+  foods: 'food',
+  restaurant: 'food',
+  restaurants: 'food',
+  'food & drinks': 'food',
+  eat: 'food',
 };
+
+// Pending recommendations per chat: chatId → list of recommendations
+const pendingRecommendations = new Map<string, Array<{
+  name: string;
+  description: string;
+  location: string;
+  category: string;
+  mapsUrl: string;
+}>>();
+
+function mapsUrl(name: string, location: string): string {
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${name} ${location}`)}`;
+}
+
+async function generateRecommendations(query: string, chatId: string): Promise<string> {
+  const response = await anthropic.messages.create({
+    model: 'claude-opus-4-6',
+    max_tokens: 1200,
+    messages: [{
+      role: 'user',
+      content: `You are an enthusiastic travel assistant. The user asked: "${query}"
+
+Suggest 5 specific, real places. Reply with a JSON array only — no explanation before or after:
+[
+  {
+    "name": "Exact place name",
+    "description": "One punchy sentence on why it's worth visiting",
+    "location": "City, Country",
+    "category": "food|activity|hotel"
+  }
+]`,
+    }],
+  });
+
+  const block = response.content[0];
+  if (block.type !== 'text') return 'Could not generate recommendations, try again!';
+
+  const jsonMatch = block.text.match(/\[[\s\S]*\]/);
+  if (!jsonMatch) return 'Could not generate recommendations, try again!';
+
+  const recs = JSON.parse(jsonMatch[0]) as Array<{ name: string; description: string; location: string; category: string }>;
+
+  const stored = recs.map(r => ({
+    name: r.name,
+    description: r.description,
+    location: r.location,
+    category: ['hotel', 'flight', 'activity', 'food'].includes(r.category) ? r.category : 'activity',
+    mapsUrl: mapsUrl(r.name, r.location),
+  }));
+
+  pendingRecommendations.set(chatId, stored);
+
+  const lines = stored.map((r, i) => {
+    const safeName = r.name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const safeDesc = r.description.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return `${CATEGORY_EMOJI[r.category] || '📍'} <b>${i + 1}. ${safeName}</b>\n${safeDesc}\n<a href="${r.mapsUrl}">📍 Open in Maps</a>`;
+  });
+
+  return lines.join('\n\n') + '\n\n<i>To save any of these, say "@bot save 1" (or the number)</i>';
+}
 
 // ── Shared list logic ────────────────────────────────────────────────────────
 
@@ -512,7 +586,10 @@ async function listCategory(ctx: any, category: string) {
     hotel: 'View hotel',
     flight: 'View flight',
     activity: 'View activity',
+    food: 'View on Maps',
   };
+
+  const isMapsUrl = (url: string) => url.includes('google.com/maps');
 
   const lines = await Promise.all(
     unique.map(async (row, i) => {
@@ -522,7 +599,9 @@ async function listCategory(ctx: any, category: string) {
       const safeTagline = tagline.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       const summaryText = safeTagline ? `\n<i>${safeTagline}</i>` : '';
       const priceText = price ? `\n💰 ${price}` : '';
-      return `<b>${i + 1}. ${safeName}</b>${summaryText}${priceText}\n<a href="${row.url}">🔗 ${viewLabel[category]}</a>\nMentioned by ${row.user_name}`;
+      const linkEmoji = isMapsUrl(row.url) ? '📍' : '🔗';
+      const mapsLine = isMapsUrl(row.url) ? '' : `\n<a href="${mapsUrl(name, '')}">📍 Maps</a>`;
+      return `<b>${i + 1}. ${safeName}</b>${summaryText}${priceText}\n<a href="${row.url}">${linkEmoji} ${viewLabel[category] || 'View'}</a>${mapsLine}\nMentioned by ${row.user_name}`;
     })
   );
 
@@ -580,6 +659,8 @@ async function removeFromCategory(ctx: any, category: string, num: number) {
 type Intent =
   | { action: 'list'; category: string }
   | { action: 'remove'; category: string; number: number }
+  | { action: 'recommend'; query: string }
+  | { action: 'save_rec'; index?: number; name?: string }
   | { action: 'help' }
   | { action: 'unknown' };
 
@@ -587,18 +668,20 @@ async function parseIntent(text: string): Promise<Intent> {
   try {
     const response = await anthropic.messages.create({
       model: 'claude-opus-4-6',
-      max_tokens: 80,
+      max_tokens: 120,
       messages: [{
         role: 'user',
-        content: `You are a trip planning bot assistant. Classify this message intent and reply with JSON only — no explanation.
+        content: `You are a trip planning bot. Classify this message intent and reply with JSON only.
 
 Message: "${text}"
 
-Possible intents:
-- List saved links: {"action":"list","category":"hotel"|"flight"|"activity"}
-- Remove an item: {"action":"remove","category":"hotel"|"flight"|"activity","number":<integer>}
-- Help request: {"action":"help"}
-- Anything else: {"action":"unknown"}
+Intents:
+- List saved links: {"action":"list","category":"hotel"|"flight"|"activity"|"food"}
+- Remove an item: {"action":"remove","category":"hotel"|"flight"|"activity"|"food","number":<integer>}
+- Ask for recommendations (places, food, activities, things to do): {"action":"recommend","query":"<full query>"}
+- Save a recommendation by number or name: {"action":"save_rec","index":<number or null>,"name":"<name or null>"}
+- Help: {"action":"help"}
+- Other: {"action":"unknown"}
 
 Reply with only the JSON object.`,
       }],
@@ -650,13 +733,13 @@ async function categorize(url: string): Promise<string> {
       max_tokens: 10,
       messages: [{
         role: 'user',
-        content: `Classify this URL as exactly one of: hotel, flight, activity\nBase your answer on the domain name, URL path, and query parameters.\nReply with one word only.\n\nURL: ${url}`,
+        content: `Classify this URL as exactly one of: hotel, flight, activity, food\nBase your answer on the domain name, URL path, and query parameters.\nReply with one word only.\n\nURL: ${url}`,
       }],
     });
     const block = response.content[0];
     if (block.type === 'text') {
       const cat = block.text.trim().toLowerCase();
-      if (['hotel', 'flight', 'activity'].includes(cat)) {
+      if (['hotel', 'flight', 'activity', 'food'].includes(cat)) {
         console.log('claude category:', cat, 'for', url);
         return cat;
       }
@@ -700,18 +783,54 @@ bot.on('message', async (ctx) => {
       await listCategory(ctx, intent.category);
     } else if (intent.action === 'remove') {
       await removeFromCategory(ctx, intent.category, intent.number);
+    } else if (intent.action === 'recommend') {
+      const msg = await generateRecommendations(intent.query, chatId);
+      ctx.reply(msg, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
+    } else if (intent.action === 'save_rec') {
+      const recs = pendingRecommendations.get(chatId);
+      if (!recs || recs.length === 0) {
+        ctx.reply('No recent recommendations to save — ask me for some first! e.g. "@bot recommend street food in Bangkok"');
+        return;
+      }
+      let rec = null;
+      if (intent.index && intent.index >= 1 && intent.index <= recs.length) {
+        rec = recs[intent.index - 1];
+      } else if (intent.name) {
+        rec = recs.find(r => r.name.toLowerCase().includes((intent.name as string).toLowerCase())) ?? null;
+      }
+      if (!rec) {
+        ctx.reply(`Couldn't find that one. Try "@bot save 1", "@bot save 2" etc.`);
+        return;
+      }
+      const { error } = await supabase
+        .from('trip_links')
+        .insert({ chat_id: chatId, user_name: userName, message_text: rec.name, url: rec.mapsUrl, category: rec.category, label: rec.name });
+      if (error) {
+        ctx.reply('Failed to save — try again!');
+        return;
+      }
+      const safeName = rec.name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      ctx.reply(
+        `${CATEGORY_EMOJI[rec.category] || '📍'} Saved <b>${safeName}</b>!\n<a href="${rec.mapsUrl}">📍 Open in Maps</a>`,
+        { parse_mode: 'HTML', link_preview_options: { is_disabled: true } }
+      );
     } else if (intent.action === 'help') {
       ctx.reply(
         "Here's what I can do:\n\n" +
-        "📎 Drop any hotel, flight, or activity link — I'll save it automatically\n\n" +
-        "/list hotels — see all saved hotels\n" +
-        "/list flights — see all saved flights\n" +
-        "/list activities — see all saved activities\n" +
-        "/remove hotels 2 — remove item #2 from the hotels list\n\n" +
-        "Or just @ me in plain English!"
+        "📎 Drop any link — I'll save and categorise it automatically\n\n" +
+        "/list hotels — saved hotels\n" +
+        "/list flights — saved flights\n" +
+        "/list activities — saved activities\n" +
+        "/list food — saved food spots\n" +
+        "/remove hotels 2 — remove item #2\n\n" +
+        "Or just @ me:\n" +
+        '• "@bot recommend street food in Bangkok"\n' +
+        '• "@bot things to do in Bali"\n' +
+        '• "@bot save 2" — saves recommendation #2\n' +
+        '• "@bot show me the hotels"'
       );
     } else {
-      ctx.reply("Not sure what you mean 🤔 Try something like \"show me the hotels\" or \"remove activity 3\"");
+      ctx.reply("Not sure what you mean 🤔 Try \"@bot recommend things to do in Tokyo\" or \"@bot show me the hotels\"");
     }
     return;
   }
@@ -750,18 +869,16 @@ bot.on('message', async (ctx) => {
     return;
   }
 
-  const categoryEmoji: Record<string, string> = { hotel: '⛺️', flight: '✈️', activity: '🔫' };
-
   if (!label) {
-    const categoryWord: Record<string, string> = { hotel: 'hotel', flight: 'flight', activity: 'activity' };
+    const categoryWord: Record<string, string> = { hotel: 'hotel', flight: 'flight', activity: 'activity', food: 'food spot' };
     const sent = await ctx.reply(
-      `${categoryEmoji[category]} Link saved! Give this ${categoryWord[category]} a name to remember it by 📝\n<i>(just reply to this message)</i>`,
+      `${CATEGORY_EMOJI[category] || '📎'} Link saved! Give this ${categoryWord[category] || 'place'} a name to remember it by 📝\n<i>(just reply to this message)</i>`,
       { parse_mode: 'HTML' }
     );
     pendingRenames.set(`${chatId}:${sent.message_id}`, url);
   } else {
     const safeLabel = label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    ctx.reply(`${categoryEmoji[category]} Saved <b>${safeLabel}</b>`, { parse_mode: 'HTML' });
+    ctx.reply(`${CATEGORY_EMOJI[category] || '📎'} Saved <b>${safeLabel}</b>`, { parse_mode: 'HTML' });
   }
 });
 
