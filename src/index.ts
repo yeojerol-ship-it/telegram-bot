@@ -394,12 +394,67 @@ function cleanTitle(raw: string): string {
   return t;
 }
 
+/**
+ * Booking.com search results pages (searchresults.html) have no og:title.
+ * When highlighted_hotels=<id> is present, fetch the hotel name via their
+ * public property-description API which returns JSON with the hotel name.
+ */
+async function fetchBookingHotelName(url: string): Promise<string | null> {
+  try {
+    const { hostname, pathname, searchParams } = new URL(url.startsWith('http') ? url : 'https://' + url);
+    if (!hostname.includes('booking.com')) return null;
+    if (!pathname.includes('searchresults')) return null;
+    const hotelId = searchParams.get('highlighted_hotels');
+    if (!hotelId) return null;
+
+    // Booking.com public property data endpoint
+    const apiUrl = `https://www.booking.com/hotel/gb/placeholder.en-gb.html?hotel_id=${hotelId}`;
+    const res = await fetch(apiUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html',
+      },
+      signal: AbortSignal.timeout(10000),
+      redirect: 'follow',
+    });
+    const html = await res.text();
+    const ogTitle = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1]
+      ?? html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i)?.[1];
+    const pageTitle = html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1];
+    const name = ogTitle ?? pageTitle;
+    console.log('booking hotel lookup:', name, 'for hotel_id', hotelId);
+    if (name && !isGenericTitle(name)) return cleanTitle(name);
+
+    // Fallback: search DDG for the hotel ID
+    const ddgRes = await fetch(
+      `https://html.duckduckgo.com/html/?q=booking.com+hotel+id+${hotelId}`,
+      {
+        headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'text/html', 'Accept-Language': 'en-US,en;q=0.9' },
+        signal: AbortSignal.timeout(10000),
+      }
+    );
+    const ddgHtml = await ddgRes.text();
+    const ddgTitle = ddgHtml.match(/class="result__a"[^>]*>([^<]+)<\/a>/)?.[1]?.trim();
+    console.log('booking ddg fallback:', ddgTitle);
+    if (ddgTitle && !isGenericTitle(ddgTitle)) return cleanTitle(ddgTitle);
+
+    return null;
+  } catch (e) {
+    console.log('fetchBookingHotelName error:', e);
+    return null;
+  }
+}
+
 async function fetchTitle(url: string): Promise<string | null> {
   const clean = (t: string | null) => t ? cleanTitle(t) : null;
 
   // 1. Slug from URL path — instant, no network
   const slugName = extractNameFromUrl(url);
   if (slugName) return slugName;
+
+  // 1b. Booking.com search results with highlighted_hotels param
+  const bookingName = await fetchBookingHotelName(url);
+  if (bookingName) return bookingName;
 
   // 2. og:title — works immediately for SSR sites (Booking.com, Agoda, Airbnb, Skyscanner…)
   const ogName = clean(await fetchOgTitle(url));
