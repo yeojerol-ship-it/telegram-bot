@@ -377,41 +377,59 @@ async function fetchTitleViaJina(url: string): Promise<string | null> {
   }
 }
 
+const NOISE_AFTER_DASH = /^(updated|review|price|deal|image|book|lowest|best|save|check|see|find|hd|rated|award|compare|voucher|discount|offer|promo)/i;
+
+function cleanTitle(raw: string): string {
+  let t = raw.trim();
+  // Strip everything after em-dash, pipe, or middle-dot — these always introduce noise
+  t = t.replace(/\s*[–—|·]\s*.+$/, '').trim();
+  // Strip after " - " only when followed by known noise words
+  const dashIdx = t.indexOf(' - ');
+  if (dashIdx > 0 && NOISE_AFTER_DASH.test(t.slice(dashIdx + 3))) {
+    t = t.slice(0, dashIdx).trim();
+  }
+  // Remove trailing comma+location noise like ", Tokyo" only when very long
+  // (keep short ones — they help identify the place)
+  return t;
+}
+
 async function fetchTitle(url: string): Promise<string | null> {
+  const clean = (t: string | null) => t ? cleanTitle(t) : null;
+
   // 1. Slug from URL path — instant, no network
   const slugName = extractNameFromUrl(url);
   if (slugName) return slugName;
 
   // 2. og:title — works immediately for SSR sites (Booking.com, Agoda, Airbnb, Skyscanner…)
-  const ogName = await fetchOgTitle(url);
+  const ogName = clean(await fetchOgTitle(url));
   if (ogName && !isGenericTitle(ogName)) return ogName;
 
   // 3. Social media crawler UAs — some sites block plain fetch but allow Facebook/Telegram bots
-  const socialName = await fetchTitleViaSocialCrawler(url);
+  const socialName = clean(await fetchTitleViaSocialCrawler(url));
   if (socialName) return socialName;
 
   // 4. Jina AI Reader — renders JS-heavy pages
-  const jinaName = await fetchTitleViaJina(url);
+  const jinaName = clean(await fetchTitleViaJina(url));
   if (jinaName && !isGenericTitle(jinaName)) return jinaName;
 
   // 5. DuckDuckGo search index — good for CAPTCHA-blocked sites like KKday
-  const ddgName = await fetchTitleViaDDG(url);
+  const ddgName = clean(await fetchTitleViaDDG(url));
   if (ddgName) return ddgName;
 
   // 6. Wayback Machine cached snapshot
-  const waybackName = await fetchTitleViaWayback(url);
+  const waybackName = clean(await fetchTitleViaWayback(url));
   if (waybackName) return waybackName;
 
   // 7. Claude web_search — last AI-powered attempt
-  const claudeWebName = await fetchTitleViaClaudeSearch(url);
+  const claudeWebName = clean(await fetchTitleViaClaudeSearch(url));
   if (claudeWebName && !isGenericTitle(claudeWebName)) return claudeWebName;
 
   // 8. Bing API (if key set)
-  const bingName = await fetchTitleViaBing(url);
+  const bingName = clean(await fetchTitleViaBing(url));
   if (bingName) return bingName;
 
   // 9. Claude reads __NEXT_DATA__ / raw HTML
-  const claudeName = await fetchTitleViaClaude(url);
+  const claudeName = clean(await fetchTitleViaClaude(url));
   if (claudeName) return claudeName;
 
   // 10. Give up — caller will ask the user
