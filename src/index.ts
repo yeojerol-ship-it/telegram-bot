@@ -705,52 +705,45 @@ async function summarizeTikTokContent(
   // Strip the URL from message to get human caption only
   const context = messageText.replace(/https?:\/\/\S+/g, '').trim();
 
-  // Path A: oEmbed — most reliable, returns actual video title
+  // Summarise whatever we have into a short title + ≤50-char intro via Claude
   const oembed = await fetchTikTokOEmbed(fullUrl);
-  if (oembed) {
-    const title = oembed.title;
-    // If there's also a caption, ask Claude to write a richer subtitle
-    if (context) {
-      try {
-        const response = await anthropic.messages.create({
-          model: 'claude-opus-4-6',
-          max_tokens: 60,
-          messages: [{
-            role: 'user',
-            content: `TikTok video titled "${title}" was shared with this caption: "${context}"\n\nWrite one punchy sentence (max 15 words) describing what this video is about.\nReply with only that sentence.`,
-          }],
-        });
-        const block = response.content[0];
-        const subtitle = block.type === 'text' ? block.text.trim() : '';
-        return { title, subtitle: subtitle || `By @${oembed.author || username || 'unknown'}` };
-      } catch {
-        return { title, subtitle: `By @${oembed.author || username || 'unknown'}` };
-      }
-    }
-    return { title, subtitle: `By @${oembed.author || username || 'unknown'}` };
-  }
+  const rawTitle = oembed?.title || '';
+  const author = oembed?.author || username || '';
+  const signals = [rawTitle, context].filter(Boolean).join(' | ');
 
-  // Path B: caption only — summarise it with Claude
-  if (context) {
+  if (signals) {
     try {
       const response = await anthropic.messages.create({
         model: 'claude-opus-4-6',
         max_tokens: 80,
         messages: [{
           role: 'user',
-          content: `A TikTok was shared with this caption: "${context}"\n\nReply with exactly 2 lines:\nLine 1: Short title (3–6 words)\nLine 2: One punchy sentence with more detail`,
+          content: `Summarise this TikTok content into 2 lines.
+Info: "${signals}"${author ? `\nCreator: @${author}` : ''}
+
+Line 1: Short title — 3 to 5 words max
+Line 2: One-line intro — 50 characters or less
+
+Reply with only these 2 lines, no labels.`,
         }],
       });
       const block = response.content[0];
       if (block.type === 'text') {
         const [titleLine, subtitleLine] = block.text.trim().split('\n').map(l => l.trim()).filter(Boolean);
-        if (titleLine) return { title: titleLine, subtitle: subtitleLine || FALLBACK.subtitle };
+        if (titleLine) {
+          return {
+            title: titleLine,
+            subtitle: subtitleLine
+              ? subtitleLine.slice(0, 50)
+              : author ? `By @${author}` : FALLBACK.subtitle,
+          };
+        }
       }
     } catch {}
   }
 
-  // Path C: show creator username as minimal hint
-  if (username) return { title: `TikTok by @${username}`, subtitle: 'Shared TikTok video' };
+  // Fallback: at least show creator username
+  if (author) return { title: `TikTok by @${author}`, subtitle: 'Shared TikTok video' };
 
   return FALLBACK;
 }
