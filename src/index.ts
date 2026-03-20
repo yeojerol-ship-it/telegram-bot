@@ -634,17 +634,36 @@ const pendingRenames = new Map<string, string>();
 
 const URL_REGEX = /https?:\/\/[^\s]+|www\.[^\s]+/i;
 
-const HOTEL_KEYWORDS = ['agoda', 'booking', 'airbnb', 'trip.com', 'hotels.com', 'expedia', 'hostelworld'];
-const FLIGHT_KEYWORDS = ['skyscanner', 'airasia', 'thaivietjet', 'vietjetair', 'lionair', 'kayak', 'google.com/flights', 'flightguru'];
+async function categorize(url: string): Promise<string> {
+  try {
+    const response = await anthropic.messages.create({
+      model: 'claude-opus-4-6',
+      max_tokens: 10,
+      messages: [{
+        role: 'user',
+        content: `Classify this URL as exactly one of: hotel, flight, activity\nBase your answer on the domain name, URL path, and query parameters.\nReply with one word only.\n\nURL: ${url}`,
+      }],
+    });
+    const block = response.content[0];
+    if (block.type === 'text') {
+      const cat = block.text.trim().toLowerCase();
+      if (['hotel', 'flight', 'activity'].includes(cat)) {
+        console.log('claude category:', cat, 'for', url);
+        return cat;
+      }
+    }
+  } catch (e) {
+    console.log('categorize error:', e);
+  }
 
-function categorize(url: string): string {
+  // Fallback: keyword matching
   const lower = url.toLowerCase();
-  // Check activity path patterns first — overrides domain-level hotel keywords
-  // e.g. agoda.com/activities/..., booking.com/attractions/...
   if (/\/(activities|attractions|things-to-do|experiences|tours?)\//.test(lower)) return 'activity';
   if (/[?&](activityId|attractionId|tourId)=/.test(lower)) return 'activity';
-  if (HOTEL_KEYWORDS.some((k) => lower.includes(k))) return 'hotel';
-  if (FLIGHT_KEYWORDS.some((k) => lower.includes(k))) return 'flight';
+  const HOTEL_KEYWORDS = ['agoda', 'booking', 'airbnb', 'trip.com', 'hotels.com', 'expedia', 'hostelworld'];
+  const FLIGHT_KEYWORDS = ['skyscanner', 'airasia', 'thaivietjet', 'vietjetair', 'lionair', 'kayak', 'google.com/flights'];
+  if (HOTEL_KEYWORDS.some(k => lower.includes(k))) return 'hotel';
+  if (FLIGHT_KEYWORDS.some(k => lower.includes(k))) return 'flight';
   return 'activity';
 }
 
@@ -710,8 +729,7 @@ bot.on('message', async (ctx) => {
   if (!URL_REGEX.test(text)) return;
 
   const url = text.match(URL_REGEX)![0];
-  const category = categorize(url);
-  const label = await fetchTitle(url);
+  const [category, label] = await Promise.all([categorize(url), fetchTitle(url)]);
 
   const { error } = await supabase
     .from('trip_links')
