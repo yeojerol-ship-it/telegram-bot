@@ -624,7 +624,7 @@ Suggest 5 specific, real places. Reply with a JSON array only — no explanation
   const lines = stored.map((r, i) => {
     const safeName = r.name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const safeDesc = r.description.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    return `${CATEGORY_EMOJI[r.category] || '📍'} <b>${i + 1}. ${safeName}</b>\n${safeDesc}\n<a href="${r.mapsUrl}">📍 Open in Maps</a>`;
+    return `<b>${i + 1}. ${safeName}</b>\n${safeDesc}\n<a href="${r.mapsUrl}">📍 Open in Maps</a>`;
   });
 
   return lines.join('\n\n') + '\n\n<i>To save any of these, say "@bot save 1" (or the number)</i>';
@@ -808,7 +808,7 @@ async function listCategory(ctx: any, category: string) {
       if (category === 'tiktok') {
         const safeSubtitle = (row.subtitle || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         const subtitleText = safeSubtitle ? `\n<i>${safeSubtitle}</i>` : '';
-        return `📱 <b>${i + 1}. ${safeName}</b>${subtitleText}\n<a href="${row.url}">▶️ ${viewLabel.tiktok}</a>\nShared by ${row.user_name}`;
+        return `<b>${i + 1}. 🎥 TikTok</b>${subtitleText}\n<a href="${row.url}">▶️ ${viewLabel.tiktok}</a>\nShared by ${row.user_name}`;
       }
 
       const { tagline, price } = await getSummary(name, category);
@@ -1220,7 +1220,7 @@ bot.on('message', async (ctx) => {
     }
     const safeTitle = title.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const safeSubtitle = subtitle.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    ctx.reply(`📱 TikTok saved!\n<b>${safeTitle}</b>\n<i>${safeSubtitle}</i>`, { parse_mode: 'HTML' });
+    ctx.reply(`📱 TikTok saved!\n<b>🎥 TikTok</b>\n<i>${safeSubtitle}</i>`, { parse_mode: 'HTML' });
     return;
   }
 
