@@ -692,6 +692,7 @@ type Intent =
   | { action: 'remove'; category: string; numbers: number[] }
   | { action: 'recommend'; query: string }
   | { action: 'save_rec'; indices?: number[]; names?: string[] }
+  | { action: 'add'; query: string }
   | { action: 'help' }
   | { action: 'unknown' };
 
@@ -711,6 +712,7 @@ Intents:
 - Remove one or more items (support "2 and 3", "2, 3", "2 3"): {"action":"remove","category":"hotel"|"flight"|"activity"|"food","numbers":[<integers>]}
 - Ask for recommendations: {"action":"recommend","query":"<full query>"}
 - Save one or more recommendations by number or name: {"action":"save_rec","indices":[<numbers>],"names":[<names or empty>]}
+- Manually add a place (add, save, remember a named place/restaurant/attraction): {"action":"add","query":"<place name and location>"}
 - Help: {"action":"help"}
 - Other: {"action":"unknown"}
 
@@ -754,6 +756,86 @@ bot.command('list', async (ctx) => {
 // Track bot messages waiting for a user-provided name
 // key: `${chatId}:${botMessageId}`, value: url awaiting a label
 const pendingRenames = new Map<string, string>();
+
+// ── Manual add flow ──────────────────────────────────────────────────────────
+
+interface AddState {
+  name: string;
+  mapsUrl: string;
+  userName: string;
+}
+const pendingAdd = new Map<string, AddState>(); // chatId → state
+
+async function searchPlace(query: string): Promise<{ name: string; mapsUrl: string } | null> {
+  try {
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=1&addressdetails=1`,
+      { headers: { 'User-Agent': 'TripPlannerBot/1.0' }, signal: AbortSignal.timeout(8000) }
+    );
+    const json = await res.json() as any[];
+    if (!json || json.length === 0) return null;
+    const place = json[0];
+    // Build a clean name: first 2 meaningful parts of display_name
+    const parts = (place.display_name as string).split(',').map((p: string) => p.trim());
+    const name = parts.slice(0, 2).join(', ');
+    const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${place.lat},${place.lon}`;
+    return { name, mapsUrl };
+  } catch {
+    return null;
+  }
+}
+
+// Inline keyboard callback handlers
+bot.action(/^add_confirm:(.+)$/, async (ctx) => {
+  const chatId = ctx.match[1];
+  const state = pendingAdd.get(chatId);
+  if (!state) { await ctx.answerCbQuery(); return; }
+  const safeName = state.name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  await ctx.editMessageText(
+    `<b>${safeName}</b>\n<a href="${state.mapsUrl}">📍 View on Maps</a>\n\nWhich category should I save this to?`,
+    {
+      parse_mode: 'HTML',
+      link_preview_options: { is_disabled: true },
+      reply_markup: { inline_keyboard: [[
+        { text: '⛺️ Hotel', callback_data: `add_cat:hotel:${chatId}` },
+        { text: '🍽️ Food', callback_data: `add_cat:food:${chatId}` },
+        { text: '🦀 Activity', callback_data: `add_cat:activity:${chatId}` },
+      ]] },
+    } as any
+  );
+  await ctx.answerCbQuery();
+});
+
+bot.action(/^add_cancel:(.+)$/, async (ctx) => {
+  const chatId = ctx.match[1];
+  pendingAdd.delete(chatId);
+  await ctx.editMessageText('Cancelled — nothing was saved 👍');
+  await ctx.answerCbQuery();
+});
+
+bot.action(/^add_cat:(\w+):(.+)$/, async (ctx) => {
+  const category = ctx.match[1];
+  const chatId = ctx.match[2];
+  const state = pendingAdd.get(chatId);
+  if (!state) { await ctx.answerCbQuery(); return; }
+
+  await supabase.from('trip_links').insert({
+    chat_id: chatId,
+    user_name: state.userName,
+    message_text: state.name,
+    url: state.mapsUrl,
+    category,
+    label: state.name,
+  });
+
+  pendingAdd.delete(chatId);
+  const safeName = state.name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  await ctx.editMessageText(
+    `${CATEGORY_EMOJI[category] || '📍'} Saved <b>${safeName}</b> to ${CATEGORY_LABEL[category]}!\n<a href="${state.mapsUrl}">📍 View on Maps</a>`,
+    { parse_mode: 'HTML', link_preview_options: { is_disabled: true } } as any
+  );
+  await ctx.answerCbQuery('Saved! ✅');
+});
 
 const URL_REGEX = /https?:\/\/[^\s]+|www\.[^\s]+/i;
 
@@ -852,6 +934,25 @@ bot.on('message', async (ctx) => {
       ctx.reply(`Saved ${toSave.length} place${toSave.length > 1 ? 's' : ''}!\n\n${savedLines}`, {
         parse_mode: 'HTML', link_preview_options: { is_disabled: true },
       });
+    } else if (intent.action === 'add') {
+      const result = await searchPlace(intent.query);
+      if (!result) {
+        ctx.reply(`Couldn't find "${intent.query}" — try being more specific (e.g. "Shibuya Crossing Tokyo")`);
+        return;
+      }
+      pendingAdd.set(chatId, { name: result.name, mapsUrl: result.mapsUrl, userName });
+      const safeName = result.name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      ctx.reply(
+        `Found <b>${safeName}</b>\n<a href="${result.mapsUrl}">📍 View on Maps</a>\n\nIs this the right place?`,
+        {
+          parse_mode: 'HTML',
+          link_preview_options: { is_disabled: true },
+          reply_markup: { inline_keyboard: [[
+            { text: '✅ Yes, save it', callback_data: `add_confirm:${chatId}` },
+            { text: '❌ No, cancel', callback_data: `add_cancel:${chatId}` },
+          ]] },
+        } as any
+      );
     } else if (intent.action === 'help') {
       ctx.reply(
         "Here's what I can do:\n\n" +
@@ -862,6 +963,7 @@ bot.on('message', async (ctx) => {
         "/list food — saved food spots\n" +
         "/remove hotels 2 — remove item #2\n\n" +
         "Or just @ me:\n" +
+        '• "@bot add Shibuya Crossing Tokyo"\n' +
         '• "@bot recommend street food in Bangkok"\n' +
         '• "@bot things to do in Bali"\n' +
         '• "@bot save 2" — saves recommendation #2\n' +
