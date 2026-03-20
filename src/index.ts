@@ -146,7 +146,7 @@ async function fetchPageHtml(url: string): Promise<string> {
   return res.text();
 }
 
-async function fetchTitleViaClaude(url: string, html?: string): Promise<string> {
+async function fetchTitleViaClaude(url: string, html?: string): Promise<string | null> {
   try {
     const fullUrl = url.startsWith('http') ? url : 'https://' + url;
 
@@ -154,37 +154,67 @@ async function fetchTitleViaClaude(url: string, html?: string): Promise<string> 
       try { html = await fetchPageHtml(url); } catch {}
     }
 
-    // Prefer __NEXT_DATA__ (Next.js embeds full page props as JSON — much richer than og:title)
     let context = '';
     if (html) {
       const nextData = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i)?.[1];
-      if (nextData) {
-        context = nextData.slice(0, 5000);
-      } else {
-        context = html.slice(0, 4000);
-      }
+      context = nextData ? nextData.slice(0, 5000) : html.slice(0, 4000);
     }
+
+    // If page is CAPTCHA or empty, skip Claude — it'll just explain why it can't help
+    if (!context || /captcha|blocked|security check|verify you are/i.test(context)) return null;
 
     const response = await anthropic.messages.create({
       model: 'claude-opus-4-6',
-      max_tokens: 60,
+      max_tokens: 30,
       messages: [{
         role: 'user',
-        content: `Extract the specific product, hotel, or activity name from the data below. Return ONLY the name (max 60 chars) — no explanation, no quotes, no brand prefix like "KKday" or "Klook".
+        content: `From the data below, return ONLY the product/hotel/activity name in 1-6 words. No explanation. If you cannot find a name, reply with exactly: unknown
 
 URL: ${fullUrl}
-${context ? `Data:\n${context}` : ''}`,
+Data: ${context}`,
       }],
     });
 
     const block = response.content[0];
-    if (block.type !== 'text') return 'Unnamed';
+    if (block.type !== 'text') return null;
     const title = block.text.trim();
     console.log('claude title:', title, 'for', url);
-    return title || 'Unnamed';
+    if (!title || title.toLowerCase() === 'unknown' || title.length > 80) return null;
+    return title;
   } catch (e) {
     console.log('fetchTitleViaClaude error:', e);
-    return 'Unnamed';
+    return null;
+  }
+}
+
+function urlFallbackTitle(url: string): string {
+  try {
+    const { hostname, pathname, searchParams } = new URL(url.startsWith('http') ? url : 'https://' + url);
+    const domain = hostname.replace('www.', '').split('.')[0];
+    const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+    // KKday: extract product ID
+    const kkdayId = pathname.match(/\/product\/(\d+)/)?.[1];
+    if (kkdayId) return `KKday Product #${kkdayId}`;
+
+    // Klook: extract activity ID
+    const klookId = pathname.match(/\/activity\/(\d+)/)?.[1];
+    if (klookId) return `Klook Activity #${klookId}`;
+
+    // Agoda: extract activityId param
+    const agodaActivityId = searchParams.get('activityId');
+    if (agodaActivityId) return `Agoda Activity #${agodaActivityId}`;
+
+    // Generic: use last meaningful path segment
+    const segments = pathname.split('/').filter(Boolean);
+    const last = segments[segments.length - 1];
+    if (last && last.length > 3 && !/^\d+$/.test(last)) {
+      return `${decodeURIComponent(last).replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase())} (${cap(domain)})`;
+    }
+
+    return `${cap(domain)} Link`;
+  } catch {
+    return 'Saved Link';
   }
 }
 
@@ -273,7 +303,11 @@ async function fetchTitle(url: string): Promise<string> {
   if (bingName) return bingName;
 
   // 7. Claude reads __NEXT_DATA__ / raw HTML as last resort
-  return await fetchTitleViaClaude(url);
+  const claudeName = await fetchTitleViaClaude(url);
+  if (claudeName) return claudeName;
+
+  // 8. Meaningful fallback from URL structure (never show "Unnamed")
+  return urlFallbackTitle(url);
 }
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
