@@ -1077,16 +1077,21 @@ bot.on('message', async (ctx) => {
   // ── TikTok fast path ───────────────────────────────────────────────────────
   if (isTikTokUrl(url)) {
     const { title, subtitle } = await summarizeTikTokContent(url, text);
-    const { error: tikError } = await supabase.from('trip_links').insert({
-      chat_id: chatId,
-      user_name: userName,
-      message_text: text,
-      url,
-      source: 'tiktok',
-      category: 'tiktok',
-      label: title,
-      subtitle,
-    });
+
+    // Try with new columns first; fall back to base columns if migration hasn't run yet
+    let tikError = (await supabase.from('trip_links').insert({
+      chat_id: chatId, user_name: userName, message_text: text,
+      url, source: 'tiktok', category: 'tiktok', label: title, subtitle,
+    })).error;
+
+    if (tikError?.message?.includes('column')) {
+      console.warn('TikTok fallback insert (migration not run yet):', tikError.message);
+      tikError = (await supabase.from('trip_links').insert({
+        chat_id: chatId, user_name: userName, message_text: text,
+        url, category: 'tiktok', label: title,
+      })).error;
+    }
+
     if (tikError) {
       console.error('TikTok insert error:', tikError.message);
       ctx.reply('Failed to save TikTok link');
