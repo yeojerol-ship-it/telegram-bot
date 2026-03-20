@@ -830,6 +830,20 @@ async function listCategory(ctx: any, category: string) {
 
 // ── Shared remove logic ──────────────────────────────────────────────────────
 
+async function removeAllFromCategory(ctx: any, category: string) {
+  const chatId = ctx.chat.id.toString();
+  const { error } = await supabase
+    .from('trip_links')
+    .delete()
+    .eq('chat_id', chatId)
+    .eq('category', category);
+  if (error) {
+    ctx.reply('Failed to clear the list');
+  } else {
+    ctx.reply(`Done! Cleared all ${CATEGORY_LABEL[category]} 🗑️`);
+  }
+}
+
 async function removeFromCategory(ctx: any, category: string, nums: number[]) {
   const chatId = ctx.chat.id.toString();
   const { data, error } = await supabase
@@ -877,6 +891,7 @@ async function removeFromCategory(ctx: any, category: string, nums: number[]) {
 type Intent =
   | { action: 'list'; category: string }
   | { action: 'remove'; category: string; numbers: number[] }
+  | { action: 'remove_all'; category: string }
   | { action: 'recommend'; query: string }
   | { action: 'save_rec'; indices?: number[]; names?: string[] }
   | { action: 'add'; query: string }
@@ -896,7 +911,8 @@ Message: "${text}"
 
 Intents:
 - List saved links: {"action":"list","category":"hotel"|"flight"|"activity"|"food"|"tiktok"}
-- Remove one or more items (support "2 and 3", "2, 3", "2 3"): {"action":"remove","category":"hotel"|"flight"|"activity"|"food","numbers":[<integers>]}
+- Remove one or more items (support "2 and 3", "2, 3", "2 3"): {"action":"remove","category":"hotel"|"flight"|"activity"|"food"|"tiktok","numbers":[<integers>]}
+- Remove ALL items from a category ("remove all", "delete everything", "clear hotels", "wipe tiktoks", etc.): {"action":"remove_all","category":"hotel"|"flight"|"activity"|"food"|"tiktok"}
 - Ask for recommendations: {"action":"recommend","query":"<full query>"}
 - Save one or more recommendations by number or name: {"action":"save_rec","indices":[<numbers>],"names":[<names or empty>]}
 - Manually add a place (add, save, remember a named place/restaurant/attraction): {"action":"add","query":"<place name and location>"}
@@ -921,9 +937,18 @@ bot.command('remove', async (ctx) => {
   const parts = ctx.message.text.split(/[\s,]+/);
   const arg = parts[1]?.toLowerCase();
   const category = categoryMap[arg];
-  const nums = parts.slice(2).map(Number).filter(n => !isNaN(n) && n > 0);
-  if (!category || nums.length === 0) {
-    ctx.reply('Usage: /remove hotels 2 — or /remove hotels 2 3 to remove multiple');
+  if (!category) {
+    ctx.reply('Usage: /remove hotels 2 — or /remove hotels all');
+    return;
+  }
+  const rest = parts.slice(2).map(s => s.toLowerCase());
+  if (rest.includes('all') || rest.includes('everything')) {
+    await removeAllFromCategory(ctx, category);
+    return;
+  }
+  const nums = rest.map(Number).filter(n => !isNaN(n) && n > 0);
+  if (nums.length === 0) {
+    ctx.reply('Usage: /remove hotels 2 — or /remove hotels all');
     return;
   }
   await removeFromCategory(ctx, category, nums);
@@ -1084,6 +1109,8 @@ bot.on('message', async (ctx) => {
 
     if (intent.action === 'list') {
       await listCategory(ctx, intent.category);
+    } else if (intent.action === 'remove_all') {
+      await removeAllFromCategory(ctx, intent.category);
     } else if (intent.action === 'remove') {
       await removeFromCategory(ctx, intent.category, intent.numbers ?? []);
     } else if (intent.action === 'recommend') {
