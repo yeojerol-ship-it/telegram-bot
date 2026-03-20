@@ -183,7 +183,23 @@ async function fetchTitle(url: string): Promise<string> {
   }
 
   const ogName = await fetchOgTitle(url);
-  return ogName || 'Unnamed';
+  if (ogName) return ogName;
+
+  // Generate a meaningful fallback from the URL
+  try {
+    const { hostname, pathname } = new URL(url.startsWith('http') ? url : 'https://' + url);
+    const domain = hostname.replace('www.', '').split('.')[0];
+    const segments = pathname.split('/').filter(Boolean);
+    const lastSegment = segments[segments.length - 1];
+    if (lastSegment && lastSegment.length > 3 && !/^\d+$/.test(lastSegment)) {
+      const readable = decodeURIComponent(lastSegment).replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      return `${readable} (${domain})`;
+    }
+    const domainName = domain.charAt(0).toUpperCase() + domain.slice(1);
+    return `${domainName} Link`;
+  } catch {}
+
+  return 'Unnamed';
 }
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
