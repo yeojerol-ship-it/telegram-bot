@@ -132,93 +132,48 @@ async function fetchOgTitle(url: string): Promise<string | null> {
   }
 }
 
-async function fetchTitle(url: string): Promise<string> {
-  // Try URL slug extraction first (works for KKday, some Klook)
-  const slugName = extractNameFromUrl(url);
-  console.log('slugName:', slugName, 'for', url);
-  if (slugName) return slugName;
-
-  // Try jsonlink first — no API key needed
-  const jsonlinkName = await fetchTitleViaJsonLink(url);
-  if (jsonlinkName) return jsonlinkName;
-
-  // Try Bing search as fallback
-  const bingName = await fetchTitleViaBing(url);
-  if (bingName) return bingName;
-
-  // Try Googlebot fetch for KKday/Klook (sites serve SSR to crawlers)
-  if (url.includes('kkday') || url.includes('klook')) {
-    try {
-      const fullUrl = url.startsWith('http') ? url : 'https://' + url;
-      const res = await fetch(fullUrl, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)' },
-        signal: AbortSignal.timeout(10000),
-        redirect: 'follow',
-      });
-      const html = await res.text();
-      const ogTitle = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1]
-        ?? html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i)?.[1];
-      const pageTitle = html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1];
-      const name = ogTitle ?? pageTitle;
-      console.log('googlebot fetch:', name);
-      if (name && !['kkday.com', 'klook.com'].includes(name.toLowerCase())) return name.trim();
-    } catch (e) {
-      console.log('googlebot fetch error:', e);
-    }
-  }
-
-  // For Klook short URLs, resolve to get activity ID first
-  let resolvedUrl = url;
-  if (url.includes('klook')) {
-    try {
-      const res = await fetch(url.startsWith('http') ? url : 'https://' + url, {
-        method: 'GET', redirect: 'follow', signal: AbortSignal.timeout(8000),
-        headers: { 'User-Agent': 'Mozilla/5.0' },
-      });
-      resolvedUrl = res.url || url;
-      console.log('klook resolved:', resolvedUrl);
-    } catch {}
-    const klookName = await fetchKlookTitle(resolvedUrl);
-    if (klookName) return klookName;
-  }
-
-  const ogName = await fetchOgTitle(url);
-  if (ogName) return ogName;
-
-  // Last resort: send URL + raw page HTML to Claude for title extraction
-  return await fetchTitleViaClaude(url);
+async function fetchPageHtml(url: string): Promise<string> {
+  const fullUrl = url.startsWith('http') ? url : 'https://' + url;
+  const res = await fetch(fullUrl, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+      'Accept': 'text/html,application/xhtml+xml',
+      'Accept-Language': 'en-US,en;q=0.9',
+    },
+    signal: AbortSignal.timeout(12000),
+    redirect: 'follow',
+  });
+  return res.text();
 }
 
-async function fetchTitleViaClaude(url: string): Promise<string> {
+async function fetchTitleViaClaude(url: string, html?: string): Promise<string> {
   try {
     const fullUrl = url.startsWith('http') ? url : 'https://' + url;
 
-    // Fetch raw HTML — even a JS shell has some metadata Claude can use
-    let htmlSnippet = '';
-    try {
-      const res = await fetch(fullUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
-          'Accept': 'text/html,application/xhtml+xml',
-          'Accept-Language': 'en-US,en;q=0.9',
-        },
-        signal: AbortSignal.timeout(10000),
-        redirect: 'follow',
-      });
-      const html = await res.text();
-      // Pass only the first 4000 chars — head section has the useful metadata
-      htmlSnippet = html.slice(0, 4000);
-    } catch {}
+    if (!html) {
+      try { html = await fetchPageHtml(url); } catch {}
+    }
+
+    // Prefer __NEXT_DATA__ (Next.js embeds full page props as JSON — much richer than og:title)
+    let context = '';
+    if (html) {
+      const nextData = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i)?.[1];
+      if (nextData) {
+        context = nextData.slice(0, 5000);
+      } else {
+        context = html.slice(0, 4000);
+      }
+    }
 
     const response = await anthropic.messages.create({
       model: 'claude-opus-4-6',
       max_tokens: 60,
       messages: [{
         role: 'user',
-        content: `Given this URL and page HTML snippet, return a short descriptive title (max 60 chars) for what this link is about. Reply with the title only — no explanation, no quotes.
+        content: `Extract the specific product, hotel, or activity name from the data below. Return ONLY the name (max 60 chars) — no explanation, no quotes, no brand prefix like "KKday" or "Klook".
 
 URL: ${fullUrl}
-${htmlSnippet ? `\nHTML snippet:\n${htmlSnippet}` : ''}`,
+${context ? `Data:\n${context}` : ''}`,
       }],
     });
 
@@ -231,6 +186,47 @@ ${htmlSnippet ? `\nHTML snippet:\n${htmlSnippet}` : ''}`,
     console.log('fetchTitleViaClaude error:', e);
     return 'Unnamed';
   }
+}
+
+async function fetchTitle(url: string): Promise<string> {
+  // 1. Try slug extraction from URL path (fast, no network)
+  const slugName = extractNameFromUrl(url);
+  if (slugName) return slugName;
+
+  // 2. For JS-heavy sites (KKday, Klook): fetch HTML and send to Claude directly
+  //    These sites use client-side rendering — og:title just returns the site name
+  if (url.includes('kkday') || url.includes('klook')) {
+    try {
+      let targetUrl = url;
+      // Resolve short/redirect URLs first
+      try {
+        const res = await fetch(url.startsWith('http') ? url : 'https://' + url, {
+          method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(6000),
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+        });
+        targetUrl = res.url || url;
+      } catch {}
+      const html = await fetchPageHtml(targetUrl);
+      return await fetchTitleViaClaude(targetUrl, html);
+    } catch (e) {
+      console.log('kkday/klook claude fetch error:', e);
+    }
+  }
+
+  // 3. For other sites: try og:title first (fast)
+  const ogName = await fetchOgTitle(url);
+  if (ogName) return ogName;
+
+  // 4. Try jsonlink as a secondary option
+  const jsonlinkName = await fetchTitleViaJsonLink(url);
+  if (jsonlinkName) return jsonlinkName;
+
+  // 5. Bing search fallback (if key set)
+  const bingName = await fetchTitleViaBing(url);
+  if (bingName) return bingName;
+
+  // 6. Final fallback: Claude reads whatever HTML the page serves
+  return await fetchTitleViaClaude(url);
 }
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
