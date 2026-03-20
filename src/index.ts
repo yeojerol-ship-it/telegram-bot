@@ -1098,13 +1098,48 @@ bot.action(/^bulk_add_cancel:(.+)$/, async (ctx) => {
 const URL_REGEX = /https?:\/\/[^\s]+|www\.[^\s]+/i;
 
 async function categorize(url: string): Promise<string> {
+  // Keyword matching runs first — faster and more reliable than Claude for known domains
+  const lower = url.toLowerCase();
+
+  // Activity signals in URL path/params
+  if (/\/(activities|attractions|things-to-do|experiences|tours?)\//.test(lower)) return 'activity';
+  if (/[?&](activityId|attractionId|tourId)=/.test(lower)) return 'activity';
+
+  // Flight booking sites
+  const FLIGHT_KEYWORDS = ['skyscanner', 'airasia', 'thaivietjet', 'vietjetair', 'lionair', 'kayak', 'google.com/flights', 'singaporeair', 'cathaypacific', 'qatarairways', 'emiratesairline', 'flyscoot', 'jetstar'];
+  if (FLIGHT_KEYWORDS.some(k => lower.includes(k))) return 'flight';
+
+  // Hotel brands and booking platforms
+  const HOTEL_KEYWORDS = [
+    // Booking platforms
+    'agoda', 'booking.com', 'airbnb', 'trip.com', 'hotels.com', 'expedia', 'hostelworld', 'trivago',
+    // Major hotel chains
+    'marriott', 'hilton', 'hyatt', 'ihg.com', 'accor', 'radisson', 'bestwestern', 'wyndham',
+    'sheraton', 'westin', 'fourseasons', 'four-seasons', 'ritz-carlton', 'ritzcarlton',
+    'intercontinental', 'holidayinn', 'crowne-plaza', 'novotel', 'pullman', 'sofitel',
+    'mandarin-oriental', 'mandarinoriental', 'shangri-la', 'shangri_la', 'peninsula',
+    'banyantre', 'banyantree', 'anantara', 'aman.com', 'sixsenses',
+  ];
+  if (HOTEL_KEYWORDS.some(k => lower.includes(k))) return 'hotel';
+
+  // Claude as fallback for unknown domains
   try {
     const response = await anthropic.messages.create({
       model: 'claude-opus-4-6',
       max_tokens: 10,
       messages: [{
         role: 'user',
-        content: `Classify this URL as exactly one of: hotel, flight, activity, food\nBase your answer on the domain name, URL path, and query parameters.\nReply with one word only.\n\nURL: ${url}`,
+        content: `Classify this travel URL into exactly one category: hotel, flight, activity, food.
+
+Rules:
+- hotel = any accommodation (hotels, resorts, hostels, villas, ryokans, apartments for stays)
+- flight = airline or flight booking
+- activity = tours, experiences, attractions, things to do
+- food = restaurants, cafes, food delivery
+
+Reply with one word only.
+
+URL: ${url}`,
       }],
     });
     const block = response.content[0];
@@ -1118,15 +1153,6 @@ async function categorize(url: string): Promise<string> {
   } catch (e) {
     console.log('categorize error:', e);
   }
-
-  // Fallback: keyword matching
-  const lower = url.toLowerCase();
-  if (/\/(activities|attractions|things-to-do|experiences|tours?)\//.test(lower)) return 'activity';
-  if (/[?&](activityId|attractionId|tourId)=/.test(lower)) return 'activity';
-  const HOTEL_KEYWORDS = ['agoda', 'booking', 'airbnb', 'trip.com', 'hotels.com', 'expedia', 'hostelworld'];
-  const FLIGHT_KEYWORDS = ['skyscanner', 'airasia', 'thaivietjet', 'vietjetair', 'lionair', 'kayak', 'google.com/flights'];
-  if (HOTEL_KEYWORDS.some(k => lower.includes(k))) return 'hotel';
-  if (FLIGHT_KEYWORDS.some(k => lower.includes(k))) return 'flight';
   return 'activity';
 }
 
